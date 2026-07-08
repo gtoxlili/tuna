@@ -1,12 +1,12 @@
-//! Local config: `tuna.toml` (gitignored) holds the DeepSeek key + model choices
-//! and the bound earphone. `DEEPSEEK_API_KEY` in the environment overrides the file.
-
-use std::path::Path;
+//! Config lives at ~/.tuna/config.toml and holds only preferences (key, earphone,
+//! voice). All file *locations* come from `paths`, so the config is portable as-is.
+//! `DEEPSEEK_API_KEY` in the environment overrides the file.
 
 use anyhow::{bail, Result};
 use serde::Deserialize;
 
 use crate::audio::tts::Tts;
+use crate::paths;
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
@@ -14,17 +14,6 @@ pub struct Config {
     pub deepseek: DeepSeekCfg,
     pub gate: GateCfg,
     pub tts: TtsCfg,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(default)]
-pub struct TtsCfg {
-    pub model: String,
-    pub voices: String,
-    pub voice: String,
-    pub speed: f32,
-    pub cache_dir: String,
-    pub sidecar: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,6 +31,13 @@ pub struct GateCfg {
     pub needle: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct TtsCfg {
+    pub voice: String,
+    pub speed: f32,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -51,20 +47,6 @@ impl Default for Config {
         }
     }
 }
-
-impl Default for TtsCfg {
-    fn default() -> Self {
-        Self {
-            model: "data/tts/models/kokoro-v1.0.int8.onnx".to_string(),
-            voices: "data/tts/models/voices-v1.0.bin".to_string(),
-            voice: "af_heart".to_string(),
-            speed: 1.0,
-            cache_dir: "cache/audio".to_string(),
-            sidecar: "sidecar/synth.py".to_string(),
-        }
-    }
-}
-
 impl Default for DeepSeekCfg {
     fn default() -> Self {
         Self {
@@ -75,7 +57,6 @@ impl Default for DeepSeekCfg {
         }
     }
 }
-
 impl Default for GateCfg {
     fn default() -> Self {
         Self {
@@ -83,38 +64,69 @@ impl Default for GateCfg {
         }
     }
 }
+impl Default for TtsCfg {
+    fn default() -> Self {
+        Self {
+            voice: "af_heart".to_string(),
+            speed: 1.0,
+        }
+    }
+}
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let mut cfg = if Path::new("tuna.toml").exists() {
-            let s = std::fs::read_to_string("tuna.toml")?;
-            toml::from_str(&s)?
+        let mut cfg = if paths::config_file().exists() {
+            toml::from_str(&std::fs::read_to_string(paths::config_file())?)?
         } else {
             Config::default()
         };
         if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
-            cfg.deepseek.api_key = key;
+            if !key.is_empty() {
+                cfg.deepseek.api_key = key;
+            }
         }
         Ok(cfg)
     }
 
-    /// Build a TTS engine from config.
+    /// A TTS engine wired to the ~/.tuna locations.
     pub fn tts_engine(&self) -> Tts {
         Tts {
-            cache_dir: self.tts.cache_dir.clone().into(),
-            model: self.tts.model.clone().into(),
-            voices: self.tts.voices.clone().into(),
+            cache_dir: paths::audio_cache(),
+            model: paths::kokoro_model(),
+            voices: paths::kokoro_voices(),
             voice: self.tts.voice.clone(),
             speed: self.tts.speed,
-            sidecar: self.tts.sidecar.clone().into(),
+            sidecar: paths::root().join("synth.py"),
         }
     }
 
-    /// The DeepSeek key, or a clear error pointing at how to set it.
     pub fn require_key(&self) -> Result<&str> {
         if self.deepseek.api_key.is_empty() {
-            bail!("no DeepSeek API key — set it in tuna.toml ([deepseek] api_key = \"…\") or $DEEPSEEK_API_KEY");
+            bail!(
+                "no DeepSeek key — set it in {} ([deepseek] api_key = \"…\") or $DEEPSEEK_API_KEY",
+                paths::config_file().display()
+            );
         }
         Ok(&self.deepseek.api_key)
     }
 }
+
+/// The config.toml written on first run.
+pub const TEMPLATE: &str = r#"# tuna 配置 · ~/.tuna/config.toml
+# DeepSeek 密钥用于词条精加工与苏格拉底辨析;学习本身离线可用,无需密钥。
+# 也可用环境变量 DEEPSEEK_API_KEY 覆盖。
+
+[deepseek]
+api_key = ""
+base_url = "https://api.deepseek.com"
+enrich_model = "deepseek-v4-flash"
+chat_model = "deepseek-v4-pro"
+
+[gate]
+# 绑定耳机的名字子串(只在连着它时才发声)
+needle = "airpods"
+
+[tts]
+voice = "af_heart"
+speed = 1.0
+"#;

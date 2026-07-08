@@ -32,53 +32,8 @@ impl Tts {
         self.cache_dir.join(format!("{:016x}.wav", h.finish()))
     }
 
-    pub fn is_cached(&self, text: &str) -> bool {
-        self.cache_path(text).exists()
-    }
-
     pub fn models_present(&self) -> bool {
         self.model.exists() && self.voices.exists()
-    }
-
-    /// Synthesize any of `texts` not already cached, via one sidecar run (one model load).
-    /// Returns how many new clips were requested.
-    pub fn synth_batch(&self, texts: &[String]) -> Result<usize> {
-        ensure!(
-            self.models_present(),
-            "Kokoro model not found at {} / {} — download it (see README).",
-            self.model.display(),
-            self.voices.display()
-        );
-        let mut jobs = Vec::new();
-        for t in texts {
-            let t = t.trim();
-            if t.is_empty() || self.is_cached(t) {
-                continue;
-            }
-            jobs.push(serde_json::json!({
-                "text": t,
-                "out": self.cache_path(t),
-                "voice": self.voice,
-                "speed": self.speed,
-            }));
-        }
-        if jobs.is_empty() {
-            return Ok(0);
-        }
-        std::fs::create_dir_all(&self.cache_dir)?;
-        let jobfile = self.cache_dir.join("_jobs.json");
-        std::fs::write(&jobfile, serde_json::to_string(&jobs)?)?;
-
-        let status = Command::new("uv")
-            .arg("run")
-            .arg(&self.sidecar)
-            .arg(&jobfile)
-            .env("KOKORO_MODEL", &self.model)
-            .env("KOKORO_VOICES", &self.voices)
-            .status()
-            .context("running the uv synth sidecar (is `uv` installed?)")?;
-        ensure!(status.success(), "synth sidecar exited with an error");
-        Ok(jobs.len())
     }
 }
 

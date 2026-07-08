@@ -4,10 +4,12 @@
 //! product depends on the guarantee validated here — that audio can be routed to a
 //! bound earphone and *only* there, and that its absence means silence.
 
+mod assets;
 mod audio;
 mod config;
 mod data;
 mod llm;
+mod paths;
 mod ui;
 
 use std::path::PathBuf;
@@ -23,143 +25,133 @@ use data::Deck;
 #[derive(Parser)]
 #[command(name = "tuna", version, about = "考研英语 · 词根推导终端")]
 struct Cli {
-    /// No subcommand starts a study session.
+    /// No subcommand starts a study session; first run bootstraps ~/.tuna.
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// List every CoreAudio device with its UID, transport, and output-stream count.
+    /// Start a study session (default). First run initializes ~/.tuna.
+    Study,
+    /// Socratic 辨析 of a word vs its confusables (needs a DeepSeek key).
+    Ask { word: String },
+    /// Deck statistics.
+    DeckInfo,
+    /// List CoreAudio devices (UID / transport / output-streams).
     Probe,
-    /// Play a test chime routed ONLY to the bound earphone. Silent (fail-closed) if absent.
+    /// Play a test chime routed ONLY to the bound earphone; silent if absent.
     GateTest {
-        /// Case-insensitive name substring of the earphone to bind (e.g. "airpods").
         #[arg(default_value = "airpods")]
         needle: String,
     },
-    /// Build the study deck from ECDICT: every 考研-tagged word + a fresh FSRS card.
+
+    // ── maintainer / dev commands (hidden) ──
+    /// [maintainer] Build the dev deck from ECDICT.
+    #[command(hide = true)]
     BuildDeck {
-        /// ECDICT SQLite database (download separately).
         #[arg(long, default_value = "data/stardict.db")]
         ecdict: PathBuf,
-        /// Output deck path.
         #[arg(long, default_value = "data/tuna.db")]
         deck: PathBuf,
     },
-    /// Show deck statistics (word count, new/introduced/due).
-    DeckInfo {
+    /// [maintainer] Export the dev deck to the committed assets/deck.jsonl.
+    #[command(hide = true)]
+    ExportDeck {
         #[arg(long, default_value = "data/tuna.db")]
         deck: PathBuf,
+        #[arg(long, default_value = "assets/deck.jsonl")]
+        out: PathBuf,
     },
-    /// Start a study session (this is also the default with no subcommand).
-    Study {
-        #[arg(long, default_value = "data/tuna.db")]
-        deck: PathBuf,
-    },
-    /// Render the study screen to text (both card stages) for verification.
-    RenderPreview {
-        #[arg(long, default_value = "data/tuna.db")]
-        deck: PathBuf,
-        /// Preview a specific word (else the queue front).
-        #[arg(long)]
-        word: Option<String>,
-    },
-    /// Pre-synthesize pronunciation audio (words + enriched examples) via Kokoro.
-    Synth {
-        #[arg(long, default_value = "data/tuna.db")]
-        deck: PathBuf,
-        /// How many top-frequency words to synthesize.
-        #[arg(long, default_value_t = 50)]
-        limit: usize,
-        /// Also synthesize each enriched word's example sentences.
-        #[arg(long, default_value_t = true)]
-        examples: bool,
-    },
-    /// Socratic 辨析 of a word vs its confusables (uses DeepSeek chat model).
-    Ask {
-        word: String,
-        #[arg(long, default_value = "data/tuna.db")]
-        deck: PathBuf,
-    },
-    /// Enrich words with DeepSeek (morphemes, derivation, graph edges, examples).
+    /// [maintainer] Enrich words with DeepSeek into the dev deck.
+    #[command(hide = true)]
     Enrich {
         #[arg(long, default_value = "data/tuna.db")]
         deck: PathBuf,
-        /// How many not-yet-enriched words to process this run.
         #[arg(long, default_value_t = 20)]
         limit: usize,
-        /// Enrich one specific word instead (repeatable), regardless of order.
         #[arg(long)]
         word: Vec<String>,
+    },
+    /// [dev] Render the study screen to text for verification.
+    #[command(hide = true)]
+    RenderPreview {
+        #[arg(long)]
+        word: Option<String>,
     },
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        None => ui::run(&PathBuf::from("data/tuna.db")),
+        None | Some(Cmd::Study) => {
+            ensure_ready()?;
+            ui::run(&paths::deck_db())
+        }
+        Some(Cmd::Ask { word }) => {
+            ensure_ready()?;
+            ask_cmd(&word)
+        }
+        Some(Cmd::DeckInfo) => {
+            ensure_ready()?;
+            deck_info(&paths::deck_db())
+        }
         Some(Cmd::Probe) => probe(),
         Some(Cmd::GateTest { needle }) => gate_test(&needle),
         Some(Cmd::BuildDeck { ecdict, deck }) => build_deck(&ecdict, &deck),
-        Some(Cmd::DeckInfo { deck }) => deck_info(&deck),
-        Some(Cmd::Study { deck }) => ui::run(&deck),
-        Some(Cmd::RenderPreview { deck, word }) => ui::preview(&deck, word),
-        Some(Cmd::Ask { word, deck }) => ask_cmd(&word, &deck),
+        Some(Cmd::ExportDeck { deck, out }) => export_deck(&deck, &out),
         Some(Cmd::Enrich { deck, limit, word }) => enrich(&deck, limit, word),
-        Some(Cmd::Synth {
-            deck,
-            limit,
-            examples,
-        }) => synth(&deck, limit, examples),
+        Some(Cmd::RenderPreview { word }) => {
+            ensure_ready()?;
+            ui::preview(&paths::deck_db(), word)
+        }
     }
 }
 
-fn synth(deck_path: &std::path::Path, limit: usize, examples: bool) -> Result<()> {
-    let cfg = config::Config::load()?;
-    let tts = cfg.tts_engine();
-    if !tts.models_present() {
-        anyhow::bail!(
-            "Kokoro model not found at {} — download it (see README).",
-            tts.model.display()
-        );
+/// First run: create ~/.tuna, drop the config + sidecar, build the DB from the
+/// embedded assets (no ECDICT, no network).
+fn bootstrap() -> Result<()> {
+    paths::ensure_dirs()?;
+    let cfg = paths::config_file();
+    if !cfg.exists() {
+        std::fs::write(&cfg, config::TEMPLATE)?;
     }
-    let deck = Deck::open(deck_path)?;
-    let words = deck.top_words(limit)?;
+    std::fs::write(paths::root().join("synth.py"), assets::SYNTH_PY)?;
 
-    // The word itself (pronunciation) + optionally its enriched example sentences.
-    let mut texts = Vec::new();
-    for w in &words {
-        texts.push(w.clone());
-        if examples {
-            if let Some(en) = deck.enrichment(w)? {
-                for ex in en.examples.iter().take(2) {
-                    if !ex.en.trim().is_empty() {
-                        texts.push(ex.en.clone());
-                    }
-                }
-            }
-        }
+    let mut deck = Deck::open(&paths::deck_db())?;
+    let n = deck.build_from_asset(assets::DECK)?;
+    let enr = deck.load_enrichment_str(assets::ENRICHMENT)?;
+    println!(
+        "  ✓ 初始化 {} — {n} 词 · {enr} 已精加工",
+        paths::root().display()
+    );
+    println!("    配置: {}", cfg.display());
+    if config::Config::load()?.deepseek.api_key.is_empty() {
+        println!("    提示: 配置里填入 DeepSeek 密钥可启用辨析(学习本身无需密钥)");
     }
-    println!(
-        "\n  synthesizing up to {} clips ({} words + examples) with voice {} …\n",
-        texts.len(),
-        words.len(),
-        cfg.tts.voice
-    );
-    let made = tts.synth_batch(&texts)?;
-    println!(
-        "\n  ✓ {made} new clip(s) → {} ({} total requested)\n",
-        tts.cache_dir.display(),
-        texts.len()
-    );
     Ok(())
 }
 
-fn ask_cmd(word: &str, deck_path: &std::path::Path) -> Result<()> {
+fn ensure_ready() -> Result<()> {
+    if !paths::is_initialized() {
+        println!("\n  首次运行,正在初始化 ~/.tuna …");
+        bootstrap()?;
+        println!();
+    }
+    Ok(())
+}
+
+fn export_deck(deck: &std::path::Path, out: &std::path::Path) -> Result<()> {
+    let d = Deck::open(deck)?;
+    let n = d.export_deck_jsonl(out)?;
+    println!("  ✓ exported {n} words → {}", out.display());
+    Ok(())
+}
+
+fn ask_cmd(word: &str) -> Result<()> {
     let cfg = config::Config::load()?;
     let key = cfg.require_key()?;
     let client = llm::DeepSeek::new(cfg.deepseek.base_url.clone(), key.to_string());
-    let deck = Deck::open(deck_path)?;
+    let deck = Deck::open(&paths::deck_db())?;
     let context = match deck.enrichment(word)? {
         Some(en) => {
             let neighbours: Vec<String> = en

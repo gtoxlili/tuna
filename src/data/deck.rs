@@ -7,9 +7,39 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rs_fsrs::{Card, Rating, ReviewLog};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 
 use super::scheduler::state_from_i64;
 use crate::llm::enrich::Enrichment;
+
+/// One scoped dictionary row — the shippable form of a 考研 word. This is what we
+/// bake into the committed/embedded `deck.jsonl` so other devices need no ECDICT.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DictRow {
+    pub word: String,
+    #[serde(default)]
+    pub sw: String,
+    #[serde(default)]
+    pub phonetic: String,
+    #[serde(default)]
+    pub translation: String,
+    #[serde(default)]
+    pub definition: String,
+    #[serde(default)]
+    pub pos: String,
+    #[serde(default)]
+    pub collins: i64,
+    #[serde(default)]
+    pub oxford: i64,
+    pub bnc: Option<i64>,
+    pub frq: Option<i64>,
+    #[serde(default)]
+    pub exchange: String,
+    #[serde(default)]
+    pub tag: String,
+    #[serde(default)]
+    pub priority: i64,
+}
 
 /// The 11 card columns, in the order `row_to_deckcard` expects.
 const CARD_COLS: &str = "c.word, c.due, c.stability, c.difficulty, c.elapsed_days, \
@@ -157,6 +187,111 @@ impl Deck {
         // Always detach, even on error.
         let _ = self.conn.execute("DETACH DATABASE ecdict", []);
         result
+    }
+
+    /// Export the scoped dictionary to jsonl (maintainer step → committed asset).
+    pub fn export_deck_jsonl(&self, out: &Path) -> Result<usize> {
+        let mut stmt = self.conn.prepare(
+            "SELECT word, sw, phonetic, translation, definition, pos, collins, oxford,
+                    bnc, frq, exchange, tag, priority
+             FROM dict ORDER BY priority ASC, word ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(DictRow {
+                word: r.get(0)?,
+                sw: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                phonetic: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                translation: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                definition: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                pos: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                collins: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                oxford: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
+                bnc: r.get(8)?,
+                frq: r.get(9)?,
+                exchange: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                tag: r.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                priority: r.get::<_, Option<i64>>(12)?.unwrap_or(999999),
+            })
+        })?;
+        let mut buf = String::new();
+        let mut n = 0;
+        for row in rows {
+            buf.push_str(&serde_json::to_string(&row?)?);
+            buf.push('\n');
+            n += 1;
+        }
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(out, buf)?;
+        Ok(n)
+    }
+
+    /// Build the deck from the embedded/committed `deck.jsonl` — the portable path,
+    /// no ECDICT required. Regenerates the graph tables (schema-evolution safe).
+    pub fn build_from_asset(&mut self, deck_jsonl: &str) -> Result<usize> {
+        let now = Utc::now();
+        self.conn.execute_batch(
+            "DROP TABLE IF EXISTS edge;
+             DROP TABLE IF EXISTS morpheme;
+             DROP TABLE IF EXISTS word_morpheme;",
+        )?;
+        self.conn.execute_batch(super::schema::SCHEMA)?;
+
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM card", [])?;
+        tx.execute("DELETE FROM dict", [])?;
+        let mut n = 0;
+        {
+            let mut ins_dict = tx.prepare(
+                "INSERT OR REPLACE INTO dict
+                   (word, sw, phonetic, translation, definition, pos, collins, oxford, bnc, frq, exchange, tag, priority)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            )?;
+            let mut ins_card = tx.prepare(
+                "INSERT OR REPLACE INTO card
+                   (word, due, stability, difficulty, elapsed_days, scheduled_days, reps, lapses, state, last_review, introduced)
+                 VALUES (?1, ?2, 0,0,0,0,0,0,0, ?2, 0)",
+            )?;
+            for line in deck_jsonl.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let d: DictRow = serde_json::from_str(line)
+                    .with_context(|| format!("parsing deck asset line: {line}"))?;
+                ins_dict.execute(params![
+                    d.word, d.sw, d.phonetic, d.translation, d.definition, d.pos,
+                    d.collins, d.oxford, d.bnc, d.frq, d.exchange, d.tag, d.priority,
+                ])?;
+                ins_card.execute(params![d.word, now])?;
+                n += 1;
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('built_at', ?1), ('source', 'embedded-asset')",
+            params![now.to_rfc3339()],
+        )?;
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// Load enrichment from an in-memory jsonl string (embedded asset).
+    pub fn load_enrichment_str(&self, jsonl: &str) -> Result<usize> {
+        let mut n = 0;
+        for line in jsonl.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(e) = serde_json::from_str::<Enrichment>(line) else {
+                continue;
+            };
+            if self.has_word(&e.word)? && self.save_enrichment(&e, line).is_ok() {
+                n += 1;
+            }
+        }
+        Ok(n)
     }
 
     pub fn stats(&self) -> Result<DeckStats> {
