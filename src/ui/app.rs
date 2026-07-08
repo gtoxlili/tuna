@@ -305,7 +305,17 @@ impl App {
         );
         match key {
             'q' => self.should_quit = true,
-            'a' if revealed => self.ask_socratic(),
+            'a' if revealed => {
+                // With a typed guess on a new word, 'a' critiques YOUR reasoning;
+                // otherwise it's a generic confusable 辨析.
+                let has_guess = self.current.as_ref().map(|c| c.is_new).unwrap_or(false)
+                    && !self.input.is_empty();
+                if has_guess {
+                    self.evaluate_guess();
+                } else {
+                    self.ask_socratic();
+                }
+            }
             g @ '1'..='4' if revealed => self.grade(g as u8 - b'0')?,
             _ => {}
         }
@@ -467,6 +477,45 @@ impl App {
         std::thread::spawn(move || {
             let client = DeepSeek::new(base, key);
             let res = crate::llm::socratic::socratic(&client, &model, &word, &context)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(res);
+        });
+        self.ask_rx = Some(rx);
+        self.ask = Ask::Pending;
+    }
+
+    /// Send the learner's OWN derivation guess to DeepSeek for a Socratic critique of
+    /// his reasoning — the guess becomes a live channel, not a dead echo.
+    fn evaluate_guess(&mut self) {
+        let Some(c) = self.current.as_ref() else {
+            return;
+        };
+        if self.ds_key.is_empty() {
+            self.ask = Ask::Failed("未配置 DeepSeek 密钥（~/.tuna/config.toml）".to_string());
+            return;
+        }
+        let word = c.entry.word.clone();
+        let morphemes = c
+            .enrichment
+            .as_ref()
+            .map(|en| {
+                en.morphemes
+                    .iter()
+                    .map(|m| format!("{}({})", m.unit, m.meaning_zh))
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            })
+            .unwrap_or_default();
+        let guess = self.input.clone();
+        let (base, key, model) = (
+            self.ds_base.clone(),
+            self.ds_key.clone(),
+            self.ds_chat_model.clone(),
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let client = DeepSeek::new(base, key);
+            let res = crate::llm::socratic::evaluate_guess(&client, &model, &word, &morphemes, &guess)
                 .map_err(|e| e.to_string());
             let _ = tx.send(res);
         });
