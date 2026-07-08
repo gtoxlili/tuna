@@ -42,18 +42,11 @@ tuna                       # 首次运行:三步设置向导,然后开始学习
 | `tuna probe` | 列出 CoreAudio 设备(UID/传输/输出流)——耳机门的事实来源 |
 | `tuna gate-test [needle]` | 播测试音,**只**走绑定耳机;不在场则静默 |
 
-## 发音（Kokoro TTS · 懒加载）
+## 发音（Kokoro TTS · 纯 Rust 单二进制）
 
-需要 [`uv`](https://docs.astral.sh/uv/) 与 Kokoro 模型(约 92MB + 28MB,int8)放到 `~/.tuna/tts/`:
+**无需 Python、无需 uv、无需系统 espeak。** 发音完全内嵌:[`ort`](https://ort.pyke.io)（ONNX Runtime,静态链接）跑 Kokoro-82M 模型,[`misaki-rs`](https://crates.io/crates/misaki-rs)（纯 Rust G2P）做音素化 —— 整条 `文本 → 音素 → token → ONNX → 24kHz 波形` 链路都在二进制里,不调任何外部进程。
 
-```bash
-curl -L -o ~/.tuna/tts/kokoro-v1.0.int8.onnx \
-  https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx
-curl -L -o ~/.tuna/tts/voices-v1.0.bin \
-  https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
-```
-
-**无需预合成。** 按 `Space`,若该词未缓存就**当场合成**:`~/.tuna/synth.py --server` 是常驻热进程,模型只加载一次,首次 ~6s(有 spinner)、之后 ~300ms,合完落缓存。`uv run` 自建环境(含 espeak-ng,无需系统安装)。
+模型权重(约 90MB + 28MB,int8)是**数据不是依赖**:首次运行的三步向导会**同步下载 + 进度条**,下齐才进入学习。按 `Space` 时,未缓存的词**当场合成**(首次含图优化 ~1.5s、之后落 WAV 缓存即取即播),且只走绑定耳机。
 
 ## 维护者（重建内嵌资产）
 
@@ -76,7 +69,7 @@ uv run scripts/narrate.py  # 词根聚类 + 受控 LLM → assets/{morphemes,enr
 - **M1** 数据管线（ECDICT → 考研牌组 → FSRS/SQLite）✓
 - **M2** 复习循环 + Ratatui 界面（拆·联·验 + 耳机门指示 + FSRS 间隔预览）✓
 - **M3** DeepSeek 词条精加工（词素/推导链/诚实词源/例句）+ 词根图边 + 拆·联 界面 ✓
-- **M4** Kokoro TTS 离线预合成 + 耳机门播放（`Space` 发音）✓
+- **M4** Kokoro TTS + 耳机门播放（`Space` 发音）✓ · 后升级为**纯 Rust 单二进制**(ort + misaki-rs,砍掉 Python/uv/espeak)
 - **M5** 打磨：词根图谱浮现（「你学过 X，同根」）+ 苏格拉底辨析（`a`）✓
 - **星座**（`g`）：当前词的词根家族——你亲手点亮的同根词（绿=记忆已稳固、琥珀=尚新鲜）与「只差一个词根」的前沿暗星。只画真实存在的共享词素边，从不臆造；语法后缀（-ion/-ly…）不算推导之桥，已滤除。✓
 - **同源合并**：Wiktionary 对每个词给出的是它*直接*的词源（inspect→spect、spectacle→spectāculum、spectator→spectate），同一词根 `spect` 因此裂成好几个节点、本该同根的词互不相连。建库时做一次确定性归并，把碎片折回最简词根——但只在「一个折叠形是另一个的前缀」且「中文释义共享义符」时才合并（所以 `port`拿/运 不会吞掉 `portion`部分，`spec`种类 不会并入 `spect`看）。词素本身保持 Wiktionary 原样，归并是可测试的透明变换。`spect` 家族由此从 2 词并到 6 词；语法后缀降级为非锚点，永不冒充"你学过的同根词"。✓
