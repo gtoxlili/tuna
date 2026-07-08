@@ -51,8 +51,9 @@ pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
     }
     let mut term = Terminal::new(TestBackend::new(96, 24))?;
 
+    app.input = "圈起来 → 限制".to_string();
     term.draw(|f| view::render(f, &app))?;
-    println!("── PROMPT ──\n{}", term.backend());
+    println!("── PROMPT (derive game) ──\n{}", term.backend());
 
     if let Some(c) = app.current.as_mut() {
         c.stage = app::Stage::Revealed;
@@ -74,14 +75,21 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
     loop {
         terminal.draw(|f| view::render(f, app))?;
 
-        // Poll with a timeout so the earphone gate stays live even when idle.
-        if event::poll(Duration::from_millis(250))? {
+        // Redraw fast while something is animating (spinner), else idle-poll so the
+        // earphone gate stays live without burning CPU.
+        let timeout = if app.is_animating() {
+            Duration::from_millis(80)
+        } else {
+            Duration::from_millis(200)
+        };
+        if event::poll(timeout)? {
             if let Event::Key(k) = event::read()? {
                 if k.kind == KeyEventKind::Press {
                     let ch = match k.code {
                         KeyCode::Char(c) => Some(c),
                         KeyCode::Enter => Some('\n'),
                         KeyCode::Esc => Some('\x1b'),
+                        KeyCode::Backspace => Some('\x08'),
                         _ => None,
                     };
                     if let Some(c) = ch {

@@ -6,11 +6,13 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
-use std::process::Command;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 
+#[derive(Clone)]
 pub struct Tts {
     pub cache_dir: PathBuf,
     pub model: PathBuf,
@@ -77,5 +79,68 @@ impl Tts {
             .context("running the uv synth sidecar (is `uv` installed?)")?;
         ensure!(status.success(), "synth sidecar exited with an error");
         Ok(jobs.len())
+    }
+}
+
+/// A warm, long-running Kokoro process. The model loads once and stays resident,
+/// so on-demand synthesis is fast after the first call — no offline pre-synth.
+/// Driven from a worker thread (its calls block on child I/O).
+pub struct TtsServer {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl TtsServer {
+    pub fn start(tts: &Tts) -> Result<Self> {
+        ensure!(
+            tts.models_present(),
+            "Kokoro model not found at {} — download it (see README).",
+            tts.model.display()
+        );
+        let mut child = Command::new("uv")
+            .arg("run")
+            .arg(&tts.sidecar)
+            .arg("--server")
+            .env("KOKORO_MODEL", &tts.model)
+            .env("KOKORO_VOICES", &tts.voices)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("spawning the uv tts server (is `uv` installed?)")?;
+        let stdin = child.stdin.take().context("tts server stdin")?;
+        let mut stdout = BufReader::new(child.stdout.take().context("tts server stdout")?);
+        // Consume the {"ready":true} line (blocks while uv resolves the env).
+        let mut ready = String::new();
+        stdout.read_line(&mut ready)?;
+        Ok(Self {
+            child,
+            stdin,
+            stdout,
+        })
+    }
+
+    /// Synthesize `text` to `out` (blocking). First call pays the model load.
+    pub fn synth(&mut self, text: &str, out: &Path, voice: &str, speed: f32) -> Result<()> {
+        let req = serde_json::json!({ "text": text, "out": out, "voice": voice, "speed": speed });
+        writeln!(self.stdin, "{req}").context("writing to tts server")?;
+        self.stdin.flush().ok();
+        let mut line = String::new();
+        let n = self.stdout.read_line(&mut line).context("reading tts server")?;
+        ensure!(n > 0, "tts server closed unexpectedly");
+        let resp: serde_json::Value = serde_json::from_str(line.trim())
+            .with_context(|| format!("tts server response: {line}"))?;
+        if resp["ok"].as_bool() != Some(true) {
+            bail!("synth failed: {}", resp["error"].as_str().unwrap_or("unknown"));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TtsServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }

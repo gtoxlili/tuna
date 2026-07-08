@@ -3,7 +3,8 @@
 //! runtime needed for the review loop — background work (LLM, audio) arrives later
 //! over channels, keeping this core simple and robust for daily use.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -11,7 +12,7 @@ use chrono::Utc;
 
 use crate::audio::coreaudio;
 use crate::audio::player::{self, RoutedPlayer};
-use crate::audio::tts::Tts;
+use crate::audio::tts::{Tts, TtsServer};
 use crate::config::Config;
 use crate::data::deck::{DeckCard, DictEntry};
 use crate::data::scheduler::rating_from_u8;
@@ -64,8 +65,17 @@ pub struct App {
     pub tts: Tts,
     /// Playback stream, held open only while the earphone is present.
     player: Option<RoutedPlayer>,
-    /// Transient one-line audio feedback (e.g. "尚未合成发音").
+    /// Warm Kokoro process, started lazily on first on-demand synth.
+    tts_server: Arc<Mutex<Option<TtsServer>>>,
+    tts_rx: Option<std::sync::mpsc::Receiver<std::result::Result<PathBuf, String>>>,
+    /// The word currently being synthesized (drives the spinner).
+    pub tts_pending: Option<String>,
+    /// Transient one-line audio feedback.
     pub audio_msg: Option<String>,
+    /// The learner's typed guess in the derive game (Phase A).
+    pub input: String,
+    /// Animation clock (spinners advance off this).
+    pub anim: Instant,
     pub queue: Vec<DeckCard>,
     pub pos: usize,
     pub current: Option<CardView>,
@@ -93,7 +103,12 @@ impl App {
             needle: cfg.gate.needle.clone(),
             tts: cfg.tts_engine(),
             player: None,
+            tts_server: Arc::new(Mutex::new(None)),
+            tts_rx: None,
+            tts_pending: None,
             audio_msg: None,
+            input: String::new(),
+            anim: Instant::now(),
             session_total: queue.len(),
             queue,
             pos: 0,
@@ -120,6 +135,7 @@ impl App {
     /// Load the card at `pos` (or `None` when the session is finished).
     fn load_current(&mut self) -> Result<()> {
         self.current = None;
+        self.input.clear();
         while self.pos < self.queue.len() {
             let dc = self.queue[self.pos].clone();
             if let Some(entry) = self.deck.entry(&dc.word)? {
@@ -182,33 +198,61 @@ impl App {
             return Ok(());
         }
         self.audio_msg = None;
+
+        // Universal keys, in every context.
         match key {
-            'q' => self.should_quit = true,
-            '\x1b' => self.should_quit = true,
-            'a' => self.ask_socratic(),
+            '\x1b' => {
+                self.should_quit = true;
+                return Ok(());
+            }
+            ' ' => {
+                self.play_audio();
+                return Ok(());
+            }
             '\n' | '\r' => {
                 if let Some(c) = &mut self.current {
                     if c.stage == Stage::Prompt {
                         c.stage = Stage::Revealed;
                     }
                 }
+                return Ok(());
             }
-            ' ' => self.play_audio(),
-            g @ '1'..='4' => {
-                let is_revealed = matches!(
-                    self.current.as_ref().map(|c| c.stage),
-                    Some(Stage::Revealed)
-                );
-                if is_revealed {
-                    self.grade(g as u8 - b'0')?;
+            _ => {}
+        }
+
+        // Derive game: on a new word's prompt, type keys build your guess.
+        let in_derive = matches!(
+            self.current.as_ref().map(|c| (c.is_new, c.stage)),
+            Some((true, Stage::Prompt))
+        );
+        if in_derive {
+            match key {
+                '\x08' | '\x7f' => {
+                    self.input.pop();
                 }
+                c if !c.is_control() => self.input.push(c),
+                _ => {}
             }
+            return Ok(());
+        }
+
+        // Command keys (review prompt / revealed / done).
+        let revealed = matches!(
+            self.current.as_ref().map(|c| c.stage),
+            Some(Stage::Revealed)
+        );
+        match key {
+            'q' => self.should_quit = true,
+            'a' if revealed => self.ask_socratic(),
+            g @ '1'..='4' if revealed => self.grade(g as u8 - b'0')?,
             _ => {}
         }
         Ok(())
     }
 
     /// Play the current word's pronunciation — only through the bound earphone.
+    /// Cached clips play instantly; uncached ones synthesize on demand via the warm
+    /// server on a worker thread (spinner shows), then play.
     fn play_audio(&mut self) {
         let Some(word) = self.current.as_ref().map(|c| c.entry.word.clone()) else {
             return;
@@ -218,13 +262,49 @@ impl App {
             return;
         }
         let path = self.tts.cache_path(&word);
-        if !path.exists() {
-            self.audio_msg = Some("尚未合成发音（tuna synth）".to_string());
+        if path.exists() {
+            self.play_cached(&word, &path);
             return;
         }
+        // Lazy synth: fire on a worker thread so the UI stays live.
+        if self.tts_pending.is_some() {
+            return;
+        }
+        if !self.tts.models_present() {
+            self.audio_msg = Some("发音模型未下载（见 README）".to_string());
+            return;
+        }
+        let tts = self.tts.clone();
+        let server = self.tts_server.clone();
+        let (w, out) = (word.clone(), path.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut guard = server.lock().unwrap();
+            if guard.is_none() {
+                match TtsServer::start(&tts) {
+                    Ok(s) => *guard = Some(s),
+                    Err(e) => {
+                        let _ = tx.send(Err(e.to_string()));
+                        return;
+                    }
+                }
+            }
+            let res = guard
+                .as_mut()
+                .unwrap()
+                .synth(&w, &out, &tts.voice, tts.speed)
+                .map(|_| out.clone())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(res);
+        });
+        self.tts_rx = Some(rx);
+        self.tts_pending = Some(word);
+    }
+
+    fn play_cached(&mut self, word: &str, path: &Path) {
         if self.ensure_player() {
             if let Some(p) = &self.player {
-                match p.play_file(&path) {
+                match p.play_file(path) {
                     Ok(()) => self.audio_msg = Some(format!("♪ {word}")),
                     Err(_) => self.audio_msg = Some("播放失败".to_string()),
                 }
@@ -232,6 +312,10 @@ impl App {
         } else {
             self.audio_msg = Some("无法打开耳机输出".to_string());
         }
+    }
+
+    pub fn is_animating(&self) -> bool {
+        matches!(self.ask, Ask::Pending) || self.tts_pending.is_some()
     }
 
     /// Ensure a playback stream bound to the earphone exists. Returns whether one is ready.
@@ -275,7 +359,7 @@ impl App {
         self.ask = Ask::Pending;
     }
 
-    /// Drain any completed Socratic response into the popup state.
+    /// Drain any completed background work (Socratic answer, on-demand synth).
     pub fn poll_async(&mut self) {
         if let Some(rx) = &self.ask_rx {
             if let Ok(res) = rx.try_recv() {
@@ -286,6 +370,23 @@ impl App {
                     };
                 }
                 self.ask_rx = None;
+            }
+        }
+        if let Some(rx) = &self.tts_rx {
+            if let Ok(res) = rx.try_recv() {
+                let word = self.tts_pending.take().unwrap_or_default();
+                self.tts_rx = None;
+                match res {
+                    Ok(path) => {
+                        if self.gate.open {
+                            self.play_cached(&word, &path);
+                        }
+                    }
+                    Err(e) => {
+                        let first = e.lines().next().unwrap_or("synth failed").to_string();
+                        self.audio_msg = Some(format!("合成失败: {first}"));
+                    }
+                }
             }
         }
     }

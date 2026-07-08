@@ -13,6 +13,13 @@ use super::theme::*;
 use crate::data::deck::parse_exchange;
 use crate::llm::enrich::Enrichment;
 
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// The current spinner glyph, advanced off the animation clock (~11 fps).
+fn spin(app: &App) -> &'static str {
+    SPINNER[(app.anim.elapsed().as_millis() / 90) as usize % SPINNER.len()]
+}
+
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let chunks = Layout::vertical([
@@ -40,12 +47,15 @@ fn render_ask(frame: &mut Frame, area: Rect, app: &App) {
     let (title, color, mut lines) = match &app.ask {
         Ask::Idle => return,
         Ask::Pending => (
-            "苏格拉底 · 思考中…",
+            "苏格拉底",
             MUTED,
-            vec![Line::from(Span::styled(
-                "让 DeepSeek 帮你把它和易混词的分别想清楚……",
-                Style::default().fg(FOAM_DIM),
-            ))],
+            vec![Line::from(vec![
+                Span::styled(format!("{} ", spin(app)), Style::default().fg(CURRENT)),
+                Span::styled(
+                    "让 DeepSeek 帮你把它和易混词的分别想清楚……",
+                    Style::default().fg(FOAM_DIM),
+                ),
+            ])],
         ),
         Ask::Answer(t) => ("苏格拉底 · 辨析", CURRENT, tui_markdown::from_str(t).lines),
         Ask::Failed(e) => ("辨析失败", CORAL, vec![plain(e)]),
@@ -141,6 +151,20 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(MUTED),
         ));
     }
+    // Frequency chip (from enrichment) — triage effort at a glance.
+    if let Some(en) = &c.enrichment {
+        if !en.freq_tier.is_empty() {
+            let tc = match en.freq_tier.as_str() {
+                "高频" => CORAL,
+                "中频" => AMBER,
+                _ => MUTED,
+            };
+            head.push(Span::styled(
+                format!("    {}", en.freq_tier),
+                Style::default().fg(tc),
+            ));
+        }
+    }
     lines.push(Line::from(head));
     lines.push(Line::raw(""));
 
@@ -162,6 +186,34 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
         }
         // Revealed (review, or un-enriched new) — plain meaning + ECDICT family
         (Stage::Revealed, _) => plain_meaning(&mut lines, c),
+    }
+
+    // Derive game (Phase A): the typed guess, echoed back on reveal to compare.
+    if c.is_new {
+        match c.stage {
+            Stage::Prompt => {
+                lines.push(Line::raw(""));
+                let mut spans = vec![Span::styled("你的推测  ", Style::default().fg(MUTED))];
+                if app.input.is_empty() {
+                    spans.push(Span::styled(
+                        "打下你推出的意思，Enter 揭示…",
+                        Style::default().fg(MUTED),
+                    ));
+                } else {
+                    spans.push(Span::styled(app.input.clone(), Style::default().fg(FOAM)));
+                }
+                spans.push(Span::styled("▋", Style::default().fg(CURRENT)));
+                lines.push(Line::from(spans));
+            }
+            Stage::Revealed if !app.input.is_empty() => {
+                lines.push(Line::raw(""));
+                lines.push(Line::from(vec![
+                    Span::styled("你刚推  ", Style::default().fg(MUTED)),
+                    Span::styled(app.input.clone(), Style::default().fg(FOAM_DIM)),
+                ]));
+            }
+            _ => {}
+        }
     }
 
     // The graph made tangible: deck words you've already learned, same root.
@@ -433,15 +485,24 @@ fn render_done(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
+    let is_new_prompt = matches!(
+        app.current.as_ref().map(|c| (c.is_new, c.stage)),
+        Some((true, Stage::Prompt))
+    );
     let spans = if app.done() {
         vec![key("q", "退出", CORAL)]
+    } else if is_new_prompt {
+        // Derive game: typed keys build your guess, so quitting is Esc.
+        vec![
+            key("Enter", "揭示", CURRENT),
+            key("Space", "发音", MUTED),
+            key("Esc", "退出", MUTED),
+        ]
     } else {
         match app.current.as_ref().map(|c| c.stage) {
             Some(Stage::Prompt) => vec![
                 key("Enter", "揭示", CURRENT),
                 key("Space", "发音", MUTED),
-                key("a", "辨析", MUTED),
-                sep(),
                 key("q", "退出", MUTED),
             ],
             _ => {
@@ -463,14 +524,21 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
     for group in spans {
         flat.extend(group);
     }
-    // Transient audio feedback, shown left of the keys.
-    if let Some(msg) = &app.audio_msg {
-        let mut with_msg = vec![Span::styled(
-            format!(" {msg}   "),
+    // Status on the left: synth spinner outranks the transient audio message.
+    let status: Option<Span> = if let Some(w) = &app.tts_pending {
+        Some(Span::styled(
+            format!(" {} 合成中 {w}   ", spin(app)),
             Style::default().fg(CURRENT),
-        )];
-        with_msg.extend(flat);
-        flat = with_msg;
+        ))
+    } else {
+        app.audio_msg
+            .as_ref()
+            .map(|msg| Span::styled(format!(" {msg}   "), Style::default().fg(CURRENT)))
+    };
+    if let Some(s) = status {
+        let mut with = vec![s];
+        with.extend(flat);
+        flat = with;
     }
     frame.render_widget(
         Paragraph::new(Line::from(flat)).style(Style::default().bg(SLATE)),

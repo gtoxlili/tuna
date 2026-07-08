@@ -44,19 +44,20 @@ cargo run -- deck-info         # 查看统计与队列
 
 DeepSeek 密钥放在 `tuna.toml`（已 gitignore）或 `$DEEPSEEK_API_KEY`。精加工是离线批处理：夜里把明天要见的词跑一遍，桌前零延迟、全静默。系统提示是 byte-stable 前缀，命中 DeepSeek 的 prompt-cache，整轮成本约几美元。
 
-## 发音（Kokoro TTS）
+## 发音（Kokoro TTS · 懒加载）
 
-需要 [`uv`](https://docs.astral.sh/uv/)。先下载 Kokoro 模型（约 92MB + 28MB，int8）：
+需要 [`uv`](https://docs.astral.sh/uv/)。只需下载 Kokoro 模型（约 92MB + 28MB，int8）：
 
 ```bash
 mkdir -p data/tts/models && cd data/tts/models
 curl -L -O https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx
 curl -L -O https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
 cd ../../..
-cargo run -- synth --limit 100      # 离线预合成，写入 cache/audio（首次会 uv 装环境）
 ```
 
-`sidecar/synth.py` 是自带依赖声明的 uv 脚本，`uv run` 会自建环境（含 espeak-ng，无需系统安装），模型只加载一次、批量合成。学习时按 `Space` 播放当前词的发音——只走绑定的耳机，耳机不在场则静默。发音缓存按 `hash(文本+音色+语速)` 内容寻址，牌组有限，一次合成、永久复用。
+**无需预合成。** 学习时按 `Space`，若该词未缓存就**当场合成**：`sidecar/synth.py --server` 是一个常驻热进程，模型只加载一次并驻留，首次 ~6s（有 spinner）、之后 ~300ms，合完落缓存、下次直接命中。发音只走绑定的耳机，耳机不在场则静默。缓存按 `hash(文本+音色+语速)` 内容寻址。
+
+`tuna synth --limit N` 仍可选——夜里提前把前 N 个词灌进缓存，纯粹图个桌前零延迟。`uv run` 会自建环境（含 espeak-ng，无需系统安装）。
 
 ## 耳机门
 
