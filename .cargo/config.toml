@@ -1,0 +1,19 @@
+# Per-target codegen flags for production builds.
+
+# This machine (macOS Apple Silicon): tune for the exact host CPU. Correct for a
+# personal `~/.local/bin` install — the binary runs on the machine it was built on.
+# (Do NOT use target-cpu=native for a redistributable macOS build — it is not portable.)
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=native"]
+
+# ── Linux distribution targets (inert on macOS; used only when cross-compiling) ──
+# mold is a much faster linker; x86-64-v3 is a modern-but-portable CPU baseline
+# (AVX2-era, ~2015+). Requires mold installed on the build host.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold", "-C", "target-cpu=x86-64-v3"]
+
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "link-arg=-fuse-ld=mold", "-C", "target-cpu=x86-64-v3"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
