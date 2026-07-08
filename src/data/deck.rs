@@ -323,6 +323,25 @@ impl Deck {
         Ok(())
     }
 
+    /// Deck words you've ALREADY introduced that share a root morpheme with `word` —
+    /// the "you already know these, same root" attach-to-the-known mechanic. Grows
+    /// as you learn: each new word wires into your existing web.
+    pub fn learned_siblings(&self, word: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT e2.src AS sibling, e1.via
+             FROM edge e1
+             JOIN edge e2 ON e2.via = e1.via AND e2.relation = 'cognate_root'
+             JOIN card c ON c.word = e2.src
+             WHERE e1.src = ?1 AND e1.relation = 'cognate_root'
+               AND e2.src <> ?1 AND c.introduced = 1 AND e1.via <> ''
+             LIMIT 6",
+        )?;
+        let rows = stmt.query_map(params![word], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Read a word's enrichment, if it has been enriched.
     pub fn enrichment(&self, word: &str) -> Result<Option<Enrichment>> {
         let json: Option<String> = self

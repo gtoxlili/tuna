@@ -2,6 +2,7 @@
 //! CLI job and any live use runs on a worker thread, so no async runtime is needed.
 
 pub mod enrich;
+pub mod socratic;
 
 use std::time::Duration;
 
@@ -57,8 +58,7 @@ impl DeepSeek {
         }
     }
 
-    /// A JSON-mode chat call. Returns the assistant's message content (a JSON
-    /// string) plus token usage. `system` should be byte-stable across calls so
+    /// A JSON-mode chat call. `system` should be byte-stable across calls so
     /// DeepSeek's prompt cache applies.
     pub fn chat_json(
         &self,
@@ -66,6 +66,28 @@ impl DeepSeek {
         system: &str,
         user: &str,
         max_tokens: u32,
+    ) -> Result<(String, Usage)> {
+        self.chat(model, system, user, max_tokens, true)
+    }
+
+    /// A plain-text chat call (for Socratic dialogue — no JSON).
+    pub fn chat_text(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<(String, Usage)> {
+        self.chat(model, system, user, max_tokens, false)
+    }
+
+    fn chat(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+        json: bool,
     ) -> Result<(String, Usage)> {
         let req = ChatRequest {
             model,
@@ -79,7 +101,7 @@ impl DeepSeek {
                     content: user,
                 },
             ],
-            response_format: Some(ResponseFormat { kind: "json_object" }),
+            response_format: json.then_some(ResponseFormat { kind: "json_object" }),
             temperature: 0.3,
             max_tokens,
         };

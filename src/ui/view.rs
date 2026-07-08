@@ -2,13 +2,13 @@
 //! and a context keybar. English/morphemes read as the machine's derivation voice;
 //! the ZH meaning you arrive at glows amber.
 
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, CardView, Stage};
+use super::app::{App, Ask, CardView, Stage};
 use super::theme::*;
 use crate::data::deck::parse_exchange;
 use crate::llm::enrich::Enrichment;
@@ -29,6 +29,53 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_card(frame, chunks[1], app);
     }
     render_keybar(frame, chunks[2], app);
+    render_ask(frame, area, app);
+}
+
+/// The Socratic 辨析 popup, drawn over everything when active.
+fn render_ask(frame: &mut Frame, area: Rect, app: &App) {
+    let (title, body, color) = match &app.ask {
+        Ask::Idle => return,
+        Ask::Pending => (
+            "苏格拉底 · 思考中…",
+            "让 DeepSeek 帮你把它和易混词的分别想清楚……".to_string(),
+            MUTED,
+        ),
+        Ask::Answer(t) => ("苏格拉底 · 辨析", t.clone(), CURRENT),
+        Ask::Failed(e) => ("辨析失败", e.clone(), CORAL),
+    };
+    let popup = centered_rect(72, 72, area);
+    frame.render_widget(Clear, popup);
+    let mut lines: Vec<Line> = body
+        .lines()
+        .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(FOAM))))
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "a / Esc 关闭",
+        Style::default().fg(MUTED),
+    )));
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(color))
+        .title(format!(" {title} "))
+        .title_style(Style::default().fg(color).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(SLATE))
+        .padding(Padding::new(2, 2, 1, 1));
+    frame.render_widget(
+        Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
+    let [h] = Layout::horizontal([Constraint::Percentage(pct_x)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [v] = Layout::vertical([Constraint::Percentage(pct_y)])
+        .flex(Flex::Center)
+        .areas(h);
+    v
 }
 
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
@@ -111,6 +158,25 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
         }
         // Revealed (review, or un-enriched new) — plain meaning + ECDICT family
         (Stage::Revealed, _) => plain_meaning(&mut lines, c),
+    }
+
+    // The graph made tangible: deck words you've already learned, same root.
+    if c.is_new && !c.siblings.is_empty() {
+        lines.push(Line::raw(""));
+        let mut spans = vec![Span::styled("你学过  ", Style::default().fg(MUTED))];
+        for (i, (w, _)) in c.siblings.iter().take(5).enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
+            }
+            spans.push(Span::styled(w.clone(), Style::default().fg(GREEN)));
+        }
+        if let Some((_, via)) = c.siblings.first() {
+            spans.push(Span::styled(
+                format!("   同根 {via}"),
+                Style::default().fg(MUTED),
+            ));
+        }
+        lines.push(Line::from(spans));
     }
 
     let block = Block::new()
@@ -370,6 +436,7 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
             Some(Stage::Prompt) => vec![
                 key("Enter", "揭示", CURRENT),
                 key("Space", "发音", MUTED),
+                key("a", "辨析", MUTED),
                 sep(),
                 key("q", "退出", MUTED),
             ],
@@ -382,6 +449,7 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
                     grade_key("4", "Easy", &hints[3], CURRENT),
                     sep(),
                     key("Space", "发音", MUTED),
+                    key("a", "辨析", MUTED),
                     key("q", "退出", MUTED),
                 ]
             }

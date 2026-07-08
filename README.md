@@ -39,7 +39,8 @@ cargo run -- deck-info         # 查看统计与队列
 | `tuna deck-info` | 牌组统计 + 频率序队列预览 |
 | `tuna enrich --limit N` | 用 DeepSeek 精加工 N 个词（词素/推导/图边/例句），存入牌组 |
 | `tuna synth --limit N` | 用 Kokoro 离线预合成前 N 个词（+例句）的发音到 `cache/audio` |
-| `tuna`（或 `tuna study`） | 开始学习会话（`Space` 发音，仅走绑定耳机） |
+| `tuna ask <word>` | 苏格拉底式辨析该词与易混/近义词（DeepSeek chat 模型） |
+| `tuna`（或 `tuna study`） | 开始学习会话（`Space` 发音 · `a` 辨析 · `Enter` 揭示） |
 
 DeepSeek 密钥放在 `tuna.toml`（已 gitignore）或 `$DEEPSEEK_API_KEY`。精加工是离线批处理：夜里把明天要见的词跑一遍，桌前零延迟、全静默。系统提示是 byte-stable 前缀，命中 DeepSeek 的 prompt-cache，整轮成本约几美元。
 
@@ -68,7 +69,8 @@ cargo run -- synth --limit 100      # 离线预合成，写入 cache/audio（首
 - **M2** 复习循环 + Ratatui 界面（拆·联·验 + 耳机门指示 + FSRS 间隔预览）✓
 - **M3** DeepSeek 词条精加工（词素/推导链/诚实词源/例句）+ 词根图边 + 拆·联 界面 ✓
 - **M4** Kokoro TTS 离线预合成 + 耳机门播放（`Space` 发音）✓
-- **M5** 打磨（tachyonfx、真题语料、个人 FSRS 权重、苏格拉底辨析）
+- **M5** 打磨：词根图谱浮现（「你学过 X，同根」）+ 苏格拉底辨析（`a`）✓
+  - backlog：tachyonfx 揭示动画、真题语料、个人 FSRS 权重离线拟合、学习仪表盘
 
 ## 许可
 

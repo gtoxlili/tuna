@@ -73,7 +73,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
                     let ch = match k.code {
                         KeyCode::Char(c) => Some(c),
                         KeyCode::Enter => Some('\n'),
-                        KeyCode::Esc => Some('q'),
+                        KeyCode::Esc => Some('\x1b'),
                         _ => None,
                     };
                     if let Some(c) = ch {
@@ -83,6 +83,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
             }
         }
         app.poll_gate();
+        app.poll_async();
         if app.should_quit {
             break;
         }

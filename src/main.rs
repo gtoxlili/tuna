@@ -76,6 +76,12 @@ enum Cmd {
         #[arg(long, default_value_t = true)]
         examples: bool,
     },
+    /// Socratic 辨析 of a word vs its confusables (uses DeepSeek chat model).
+    Ask {
+        word: String,
+        #[arg(long, default_value = "data/tuna.db")]
+        deck: PathBuf,
+    },
     /// Enrich words with DeepSeek (morphemes, derivation, graph edges, examples).
     Enrich {
         #[arg(long, default_value = "data/tuna.db")]
@@ -98,6 +104,7 @@ fn main() -> Result<()> {
         Some(Cmd::DeckInfo { deck }) => deck_info(&deck),
         Some(Cmd::Study { deck }) => ui::run(&deck),
         Some(Cmd::RenderPreview { deck, word }) => ui::preview(&deck, word),
+        Some(Cmd::Ask { word, deck }) => ask_cmd(&word, &deck),
         Some(Cmd::Enrich { deck, limit, word }) => enrich(&deck, limit, word),
         Some(Cmd::Synth {
             deck,
@@ -145,6 +152,29 @@ fn synth(deck_path: &std::path::Path, limit: usize, examples: bool) -> Result<()
         tts.cache_dir.display(),
         texts.len()
     );
+    Ok(())
+}
+
+fn ask_cmd(word: &str, deck_path: &std::path::Path) -> Result<()> {
+    let cfg = config::Config::load()?;
+    let key = cfg.require_key()?;
+    let client = llm::DeepSeek::new(cfg.deepseek.base_url.clone(), key.to_string());
+    let deck = Deck::open(deck_path)?;
+    let context = match deck.enrichment(word)? {
+        Some(en) => {
+            let neighbours: Vec<String> = en
+                .graph_edges
+                .iter()
+                .filter(|e| e.relation == "confusable" || e.relation == "synonym")
+                .map(|e| e.target.clone())
+                .collect();
+            format!("词义: {}\n易混/近义: {}", en.gloss_zh, neighbours.join(", "))
+        }
+        None => String::new(),
+    };
+    println!("\n  苏格拉底 · {word}\n");
+    let text = llm::socratic::socratic(&client, &cfg.deepseek.chat_model, word, &context)?;
+    println!("{text}\n");
     Ok(())
 }
 

@@ -17,6 +17,7 @@ use crate::data::deck::{DeckCard, DictEntry};
 use crate::data::scheduler::rating_from_u8;
 use crate::data::{Deck, Scheduler};
 use crate::llm::enrich::Enrichment;
+use crate::llm::DeepSeek;
 
 /// Introductions per session — the comfortable 2028 pace (leaves room for reviews).
 const NEW_PER_SESSION: usize = 15;
@@ -36,11 +37,21 @@ pub struct GateStatus {
     pub device: Option<String>,
 }
 
+/// State of the on-demand Socratic 辨析 popup.
+pub enum Ask {
+    Idle,
+    Pending,
+    Answer(String),
+    Failed(String),
+}
+
 pub struct CardView {
     pub dc: DeckCard,
     pub entry: DictEntry,
     /// DeepSeek enrichment (morphemes/derivation/graph), if this word has it.
     pub enrichment: Option<Enrichment>,
+    /// Deck words already learned that share a root — (word, via-morpheme).
+    pub siblings: Vec<(String, String)>,
     /// Phase A (拆·联, first meeting) vs Phase B (验, retrieval).
     pub is_new: bool,
     pub stage: Stage,
@@ -64,6 +75,12 @@ pub struct App {
     pub session_reviews: u32,
     pub session_total: usize,
     pub should_quit: bool,
+    // Socratic 辨析 (live DeepSeek on a worker thread)
+    pub ask: Ask,
+    ask_rx: Option<std::sync::mpsc::Receiver<std::result::Result<String, String>>>,
+    ds_base: String,
+    ds_key: String,
+    ds_chat_model: String,
 }
 
 impl App {
@@ -89,6 +106,11 @@ impl App {
             session_new: 0,
             session_reviews: 0,
             should_quit: false,
+            ask: Ask::Idle,
+            ask_rx: None,
+            ds_base: cfg.deepseek.base_url.clone(),
+            ds_key: cfg.deepseek.api_key.clone(),
+            ds_chat_model: cfg.deepseek.chat_model.clone(),
         };
         app.poll_gate();
         app.load_current()?;
@@ -102,10 +124,12 @@ impl App {
             let dc = self.queue[self.pos].clone();
             if let Some(entry) = self.deck.entry(&dc.word)? {
                 let enrichment = self.deck.enrichment(&dc.word).unwrap_or(None);
+                let siblings = self.deck.learned_siblings(&dc.word).unwrap_or_default();
                 self.current = Some(CardView {
                     is_new: !dc.introduced,
                     entry,
                     enrichment,
+                    siblings,
                     dc,
                     stage: Stage::Prompt,
                 });
@@ -121,6 +145,7 @@ impl App {
     pub fn force_card(&mut self, word: &str) -> Result<bool> {
         if let Some(entry) = self.deck.entry(word)? {
             let enrichment = self.deck.enrichment(word).unwrap_or(None);
+            let siblings = self.deck.learned_siblings(word).unwrap_or_default();
             self.current = Some(CardView {
                 dc: DeckCard {
                     word: word.to_string(),
@@ -129,6 +154,7 @@ impl App {
                 },
                 entry,
                 enrichment,
+                siblings,
                 is_new: true,
                 stage: Stage::Prompt,
             });
@@ -147,9 +173,19 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: char) -> Result<()> {
+        // The Socratic popup swallows input; 'a' or Esc closes it.
+        if !matches!(self.ask, Ask::Idle) {
+            if key == 'a' || key == '\x1b' {
+                self.ask = Ask::Idle;
+                self.ask_rx = None;
+            }
+            return Ok(());
+        }
         self.audio_msg = None;
         match key {
             'q' => self.should_quit = true,
+            '\x1b' => self.should_quit = true,
+            'a' => self.ask_socratic(),
             '\n' | '\r' => {
                 if let Some(c) = &mut self.current {
                     if c.stage == Stage::Prompt {
@@ -212,6 +248,48 @@ impl App {
         false
     }
 
+    /// Fire a Socratic 辨析 request on a worker thread (non-blocking UI).
+    fn ask_socratic(&mut self) {
+        let Some(c) = self.current.as_ref() else {
+            return;
+        };
+        if self.ds_key.is_empty() {
+            self.ask = Ask::Failed("未配置 DeepSeek 密钥（tuna.toml）".to_string());
+            return;
+        }
+        let word = c.entry.word.clone();
+        let context = socratic_context(c);
+        let (base, key, model) = (
+            self.ds_base.clone(),
+            self.ds_key.clone(),
+            self.ds_chat_model.clone(),
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let client = DeepSeek::new(base, key);
+            let res = crate::llm::socratic::socratic(&client, &model, &word, &context)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(res);
+        });
+        self.ask_rx = Some(rx);
+        self.ask = Ask::Pending;
+    }
+
+    /// Drain any completed Socratic response into the popup state.
+    pub fn poll_async(&mut self) {
+        if let Some(rx) = &self.ask_rx {
+            if let Ok(res) = rx.try_recv() {
+                if matches!(self.ask, Ask::Pending) {
+                    self.ask = match res {
+                        Ok(t) => Ask::Answer(t),
+                        Err(e) => Ask::Failed(e),
+                    };
+                }
+                self.ask_rx = None;
+            }
+        }
+    }
+
     fn grade(&mut self, n: u8) -> Result<()> {
         let Some(rating) = rating_from_u8(n) else {
             return Ok(());
@@ -272,6 +350,29 @@ impl App {
             self.player = None;
         }
     }
+}
+
+/// Build context for a Socratic request from the card's enrichment (confusables +
+/// near-synonyms + gloss) so the model contrasts the right neighbours.
+fn socratic_context(c: &CardView) -> String {
+    let mut s = String::new();
+    if let Some(en) = &c.enrichment {
+        if !en.gloss_zh.is_empty() {
+            s.push_str(&format!("词义: {}\n", en.gloss_zh));
+        }
+        let neighbours: Vec<String> = en
+            .graph_edges
+            .iter()
+            .filter(|e| e.relation == "confusable" || e.relation == "synonym")
+            .map(|e| e.target.clone())
+            .collect();
+        if !neighbours.is_empty() {
+            s.push_str(&format!("易混/近义: {}\n", neighbours.join(", ")));
+        }
+    } else if let Some(t) = c.entry.translation.lines().next() {
+        s.push_str(&format!("词义: {}\n", t.trim()));
+    }
+    s
 }
 
 /// Render a `chrono::Duration` as a compact human interval (10m / 3h / 6d).
