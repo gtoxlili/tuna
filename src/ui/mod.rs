@@ -49,7 +49,7 @@ pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
             return Ok(());
         }
     }
-    let mut term = Terminal::new(TestBackend::new(96, 24))?;
+    let mut term = Terminal::new(TestBackend::new(96, 32))?;
 
     app.input = "圈起来 → 限制".to_string();
     term.draw(|f| view::render(f, &app))?;
@@ -57,9 +57,20 @@ pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
 
     if let Some(c) = app.current.as_mut() {
         c.stage = app::Stage::Revealed;
+        if c.anchor.is_some() {
+            c.strike = app::Strike::Prompt;
+        }
     }
     term.draw(|f| view::render(f, &app))?;
-    println!("\n── REVEALED ──\n{}", term.backend());
+    println!("\n── REVEALED (+ 星火接线 prompt if anchor) ──\n{}", term.backend());
+
+    if app.current.as_ref().map(|c| c.anchor.is_some()).unwrap_or(false) {
+        if let Some(c) = app.current.as_mut() {
+            c.strike = app::Strike::Flipped;
+        }
+        term.draw(|f| view::render(f, &app))?;
+        println!("\n── STRIKE FLIPPED (recall check) ──\n{}", term.backend());
+    }
 
     // Verify the Socratic popup renders markdown (bold/lists), not raw syntax.
     app.ask = app::Ask::Answer(

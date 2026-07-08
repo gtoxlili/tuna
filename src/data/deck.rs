@@ -99,6 +99,18 @@ pub struct DeckCard {
     pub card: Card,
 }
 
+/// A learned sibling that could anchor a new word — carried with its FSRS card so
+/// the earned-edge engine can score it by retrievability and refresh it on recall.
+#[derive(Debug, Clone)]
+pub struct AnchorCand {
+    pub word: String,
+    pub morpheme_id: String,
+    pub surface: String,
+    pub gloss_zh: String,
+    pub members: i64,
+    pub card: Card,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct DeckStats {
     pub words: i64,
@@ -502,6 +514,45 @@ impl Deck {
             }
         }
         Ok(n)
+    }
+
+    /// A candidate anchor: a learned deck word sharing a root with the new word,
+    /// carried with its FSRS card so the caller can score by retrievability.
+    pub fn anchor_candidates(&self, word: &str) -> Result<Vec<AnchorCand>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT wm2.word, wm1.morpheme_id,
+                    COALESCE(m.surface, wm1.surface), COALESCE(m.gloss_zh, ''),
+                    (SELECT COUNT(*) FROM word_morpheme w3 WHERE w3.morpheme_id = wm1.morpheme_id) AS members,
+                    c.due, c.stability, c.difficulty, c.elapsed_days, c.scheduled_days,
+                    c.reps, c.lapses, c.state, c.last_review
+             FROM word_morpheme wm1
+             JOIN word_morpheme wm2
+                  ON wm2.morpheme_id = wm1.morpheme_id AND wm2.word <> wm1.word
+             LEFT JOIN morpheme m ON m.id = wm1.morpheme_id
+             JOIN card c ON c.word = wm2.word AND c.introduced = 1
+             WHERE wm1.word = ?1",
+        )?;
+        let rows = stmt.query_map(params![word], |r| {
+            Ok(AnchorCand {
+                word: r.get(0)?,
+                morpheme_id: r.get(1)?,
+                surface: r.get(2)?,
+                gloss_zh: r.get(3)?,
+                members: r.get(4)?,
+                card: Card {
+                    due: r.get(5)?,
+                    stability: r.get(6)?,
+                    difficulty: r.get(7)?,
+                    elapsed_days: r.get(8)?,
+                    scheduled_days: r.get(9)?,
+                    reps: r.get(10)?,
+                    lapses: r.get(11)?,
+                    state: state_from_i64(r.get(12)?),
+                    last_review: r.get(13)?,
+                },
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Deck words you've ALREADY introduced that share a canonical morpheme with `word`

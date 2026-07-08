@@ -33,6 +33,26 @@ pub enum Stage {
     Revealed,
 }
 
+/// The earned-edge (星火接线) sub-interaction, only when a learned sibling exists.
+#[derive(PartialEq, Clone, Copy)]
+pub enum Strike {
+    /// No anchor, or grading is unblocked.
+    Idle,
+    /// "Which learned word carries this root?" — anchor hidden, recall in your head.
+    Prompt,
+    /// Anchor revealed — did you remember it? (y / n)
+    Flipped,
+}
+
+/// The chosen anchor: a learned sibling to recall, with its FSRS card to refresh.
+#[derive(Clone)]
+pub struct Anchor {
+    pub word: String,
+    pub surface: String,
+    pub gloss_zh: String,
+    pub card: rs_fsrs::Card,
+}
+
 pub struct GateStatus {
     pub open: bool,
     pub device: Option<String>,
@@ -53,6 +73,9 @@ pub struct CardView {
     pub enrichment: Option<Enrichment>,
     /// Deck words already learned that share a root — (word, via-morpheme).
     pub siblings: Vec<(String, String)>,
+    /// The best learned sibling to attach this new word to (星火接线), if any.
+    pub anchor: Option<Anchor>,
+    pub strike: Strike,
     /// Phase A (拆·联, first meeting) vs Phase B (验, retrieval).
     pub is_new: bool,
     pub stage: Stage,
@@ -141,11 +164,18 @@ impl App {
             if let Some(entry) = self.deck.entry(&dc.word)? {
                 let enrichment = self.deck.enrichment(&dc.word).unwrap_or(None);
                 let siblings = self.deck.learned_siblings(&dc.word).unwrap_or_default();
+                let anchor = if dc.introduced {
+                    None
+                } else {
+                    self.best_anchor(&dc.word)
+                };
                 self.current = Some(CardView {
                     is_new: !dc.introduced,
                     entry,
                     enrichment,
                     siblings,
+                    anchor,
+                    strike: Strike::Idle,
                     dc,
                     stage: Stage::Prompt,
                 });
@@ -162,6 +192,7 @@ impl App {
         if let Some(entry) = self.deck.entry(word)? {
             let enrichment = self.deck.enrichment(word).unwrap_or(None);
             let siblings = self.deck.learned_siblings(word).unwrap_or_default();
+            let anchor = self.best_anchor(word);
             self.current = Some(CardView {
                 dc: DeckCard {
                     word: word.to_string(),
@@ -171,6 +202,8 @@ impl App {
                 entry,
                 enrichment,
                 siblings,
+                anchor,
+                strike: Strike::Idle,
                 is_new: true,
                 stage: Stage::Prompt,
             });
@@ -199,6 +232,31 @@ impl App {
         }
         self.audio_msg = None;
 
+        // ── 星火接线 sub-interaction — blocks grading until you resolve the recall ──
+        let strike = self.current.as_ref().map(|c| c.strike).unwrap_or(Strike::Idle);
+        match (strike, key) {
+            (Strike::Prompt, ' ') => {
+                if let Some(c) = &mut self.current {
+                    c.strike = Strike::Flipped; // flip the card — reveal the anchor
+                }
+                return Ok(());
+            }
+            (Strike::Flipped, 'y' | 'Y') => {
+                self.grade_anchor(rs_fsrs::Rating::Good)?; // recalled → real refresh
+                return Ok(());
+            }
+            (Strike::Flipped, 'n' | 'N') => {
+                self.grade_anchor(rs_fsrs::Rating::Again)?; // blanked → honest lapse
+                return Ok(());
+            }
+            (Strike::Prompt | Strike::Flipped, '\x1b') => {
+                self.should_quit = true;
+                return Ok(());
+            }
+            (Strike::Prompt | Strike::Flipped, _) => return Ok(()), // swallow the rest
+            _ => {}
+        }
+
         // Universal keys, in every context.
         match key {
             '\x1b' => {
@@ -213,6 +271,10 @@ impl App {
                 if let Some(c) = &mut self.current {
                     if c.stage == Stage::Prompt {
                         c.stage = Stage::Revealed;
+                        // A learned sibling exists → light the 星火接线 prompt.
+                        if c.anchor.is_some() {
+                            c.strike = Strike::Prompt;
+                        }
                     }
                 }
                 return Ok(());
@@ -316,6 +378,59 @@ impl App {
 
     pub fn is_animating(&self) -> bool {
         matches!(self.ask, Ask::Pending) || self.tts_pending.is_some()
+    }
+
+    /// Pick the best learned sibling to anchor a new word: a shared root, weighted by
+    /// specificity (a rare root beats the -tion flood) × kind × the reactivation band
+    /// — prefer a fading-but-recoverable sibling, so recalling it does honest double duty.
+    fn best_anchor(&self, word: &str) -> Option<Anchor> {
+        let now = Utc::now();
+        let mut best: Option<(f64, Anchor)> = None;
+        for c in self.deck.anchor_candidates(word).ok()? {
+            let specificity = 1.0 / (1.0 + c.members.max(1) as f64).ln();
+            let kind_w = if c.morpheme_id.ends_with('-') {
+                0.5 // prefix
+            } else if c.morpheme_id.starts_with('-') {
+                0.35 // suffix
+            } else {
+                1.0 // root
+            };
+            let r = c.card.get_retrievability(now); // 0..1
+            let reactivation = 1.0 - ((r - 0.75).abs() * 1.6).min(1.0); // peaks at 0.75
+            let score = specificity * kind_w * (0.5 + 0.5 * reactivation);
+            if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
+                best = Some((
+                    score,
+                    Anchor {
+                        word: c.word,
+                        surface: c.surface,
+                        gloss_zh: c.gloss_zh,
+                        card: c.card,
+                    },
+                ));
+            }
+        }
+        best.map(|(_, a)| a)
+    }
+
+    /// Grade the recalled anchor (the OLD word): a real FSRS review, because the
+    /// retrieval was real. The node heals only when retrieved, never when displayed.
+    fn grade_anchor(&mut self, rating: rs_fsrs::Rating) -> Result<()> {
+        let Some(anchor) = self.current.as_ref().and_then(|c| c.anchor.clone()) else {
+            return Ok(());
+        };
+        let info = self.scheduler.grade(anchor.card.clone(), rating, Utc::now());
+        self.deck.save_card(&anchor.word, &info.card, true)?;
+        self.deck.log_review(&anchor.word, rating, &info.review_log)?;
+        if let Some(c) = &mut self.current {
+            c.strike = Strike::Idle; // resolved — grading the new word is unblocked
+        }
+        self.audio_msg = Some(if matches!(rating, rs_fsrs::Rating::Good) {
+            format!("✦ 接线成功  {}  +1 复习", anchor.word)
+        } else {
+            format!("· 揭示  {}  (记一次待复习)", anchor.word)
+        });
+        Ok(())
     }
 
     /// Ensure a playback stream bound to the earphone exists. Returns whether one is ready.

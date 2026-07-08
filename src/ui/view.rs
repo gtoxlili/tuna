@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, Ask, CardView, Stage};
+use super::app::{App, Ask, CardView, Stage, Strike};
 use super::theme::*;
 use crate::data::deck::parse_exchange;
 use crate::llm::enrich::Enrichment;
@@ -216,23 +216,65 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    // The graph made tangible: deck words you've already learned, same root.
-    if c.is_new && !c.siblings.is_empty() {
-        lines.push(Line::raw(""));
-        let mut spans = vec![Span::styled("你学过  ", Style::default().fg(MUTED))];
-        for (i, (w, _)) in c.siblings.iter().take(5).enumerate() {
-            if i > 0 {
-                spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
+    // 星火接线 — after the reveal, EARN the edge by recalling a learned sibling.
+    // (In Prompt we stay quiet so the siblings list never spoils the recall.)
+    if c.is_new && c.stage == Stage::Revealed {
+        match c.strike {
+            Strike::Prompt => {
+                if let Some(a) = &c.anchor {
+                    lines.push(Line::raw(""));
+                    lines.push(Line::from(vec![
+                        Span::styled("✦ 词根 ", Style::default().fg(AMBER)),
+                        Span::styled(
+                            a.surface.clone(),
+                            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(format!("({}) ", a.gloss_zh), Style::default().fg(MUTED)),
+                        Span::styled("你在哪个已学的词里见过？", Style::default().fg(FOAM)),
+                    ]));
+                    lines.push(Line::from(Span::styled(
+                        "  在脑中想出那个词，Space 翻牌",
+                        Style::default().fg(MUTED),
+                    )));
+                }
             }
-            spans.push(Span::styled(w.clone(), Style::default().fg(GREEN)));
+            Strike::Flipped => {
+                if let Some(a) = &c.anchor {
+                    lines.push(Line::raw(""));
+                    lines.push(Line::from(vec![
+                        Span::styled("✦ 你学过  ", Style::default().fg(AMBER)),
+                        Span::styled(
+                            a.word.clone(),
+                            Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("  （{} · {}）", a.surface, a.gloss_zh),
+                            Style::default().fg(MUTED),
+                        ),
+                    ]));
+                    lines.push(Line::from(Span::styled(
+                        "  想起来了吗？ y 记得 · n 想不起",
+                        Style::default().fg(FOAM_DIM),
+                    )));
+                }
+            }
+            Strike::Idle => {
+                if !c.siblings.is_empty() {
+                    lines.push(Line::raw(""));
+                    let mut spans = vec![Span::styled("你学过  ", Style::default().fg(MUTED))];
+                    for (i, (w, _)) in c.siblings.iter().take(5).enumerate() {
+                        if i > 0 {
+                            spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
+                        }
+                        spans.push(Span::styled(w.clone(), Style::default().fg(GREEN)));
+                    }
+                    if let Some((_, via)) = c.siblings.first() {
+                        spans.push(Span::styled(format!("   同根 {via}"), Style::default().fg(MUTED)));
+                    }
+                    lines.push(Line::from(spans));
+                }
+            }
         }
-        if let Some((_, via)) = c.siblings.first() {
-            spans.push(Span::styled(
-                format!("   同根 {via}"),
-                Style::default().fg(MUTED),
-            ));
-        }
-        lines.push(Line::from(spans));
     }
 
     let block = Block::new()
@@ -474,8 +516,17 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
         app.current.as_ref().map(|c| (c.is_new, c.stage)),
         Some((true, Stage::Prompt))
     );
+    let strike = app.current.as_ref().map(|c| c.strike).unwrap_or(Strike::Idle);
     let spans = if app.done() {
         vec![key("q", "退出", CORAL)]
+    } else if strike == Strike::Prompt {
+        vec![key("Space", "翻牌", AMBER), key("Esc", "退出", MUTED)]
+    } else if strike == Strike::Flipped {
+        vec![
+            key("y", "记得", GREEN),
+            key("n", "想不起", CORAL),
+            key("Esc", "退出", MUTED),
+        ]
     } else if is_new_prompt {
         // Derive game: typed keys build your guess, so quitting is Esc.
         vec![
