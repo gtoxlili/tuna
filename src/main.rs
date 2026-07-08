@@ -5,12 +5,17 @@
 //! bound earphone and *only* there, and that its absence means silence.
 
 mod audio;
+mod data;
+
+use std::path::PathBuf;
 
 use anyhow::Result;
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 
 use audio::coreaudio;
 use audio::player::{self, RoutedPlayer};
+use data::Deck;
 
 #[derive(Parser)]
 #[command(name = "tuna", version, about = "考研英语 · 词根推导终端")]
@@ -29,13 +34,72 @@ enum Cmd {
         #[arg(default_value = "airpods")]
         needle: String,
     },
+    /// Build the study deck from ECDICT: every 考研-tagged word + a fresh FSRS card.
+    BuildDeck {
+        /// ECDICT SQLite database (download separately).
+        #[arg(long, default_value = "data/stardict.db")]
+        ecdict: PathBuf,
+        /// Output deck path.
+        #[arg(long, default_value = "data/tuna.db")]
+        deck: PathBuf,
+    },
+    /// Show deck statistics (word count, new/introduced/due).
+    DeckInfo {
+        #[arg(long, default_value = "data/tuna.db")]
+        deck: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Probe => probe(),
         Cmd::GateTest { needle } => gate_test(&needle),
+        Cmd::BuildDeck { ecdict, deck } => build_deck(&ecdict, &deck),
+        Cmd::DeckInfo { deck } => deck_info(&deck),
     }
+}
+
+fn build_deck(ecdict: &std::path::Path, deck_path: &std::path::Path) -> Result<()> {
+    println!("\n  building deck from {} …", ecdict.display());
+    let mut deck = Deck::open(deck_path)?;
+    let n = deck.build_from_ecdict(ecdict)?;
+    let s = deck.stats()?;
+    println!("  ✓ {n} 考研 words imported → {}", deck_path.display());
+    println!(
+        "    words {} · cards {} · new {} · due now {}\n",
+        s.words, s.cards, s.new, s.due_now
+    );
+    Ok(())
+}
+
+fn deck_info(deck_path: &std::path::Path) -> Result<()> {
+    let deck = Deck::open(deck_path)?;
+    let s = deck.stats()?;
+    println!("\n  deck: {}", deck_path.display());
+    println!("  ─────────────────────────────");
+    println!("  words       {}", s.words);
+    println!("  cards       {}", s.cards);
+    println!("  new         {}", s.new);
+    println!("  introduced  {}", s.introduced);
+    println!("  due now     {}", s.due_now);
+
+    // Show a few of the first cards queued so the pipeline is legible.
+    let queue = deck.next_queue(Utc::now(), 6)?;
+    if !queue.is_empty() {
+        println!("\n  next up (frequency-ordered):");
+        for c in &queue {
+            if let Some(e) = deck.entry(&c.word)? {
+                println!(
+                    "    {:<16} {:<20} {}",
+                    e.word,
+                    e.phonetic,
+                    e.translation.lines().next().unwrap_or("").trim()
+                );
+            }
+        }
+    }
+    println!();
+    Ok(())
 }
 
 fn probe() -> Result<()> {
