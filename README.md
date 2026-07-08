@@ -58,10 +58,13 @@ curl -L -o ~/.tuna/tts/voices-v1.0.bin \
 ## 维护者（重建内嵌资产）
 
 ```bash
-tuna build-deck        # ECDICT(data/stardict.db) → data/tuna.db
-tuna export-deck       # data/tuna.db → assets/deck.jsonl(提交进仓库)
-uv run scripts/enrich.py   # DeepSeek 精加工 → assets/enrichment.jsonl(提交)
+tuna build-deck            # ECDICT(data/stardict.db) → data/tuna.db
+tuna export-deck           # data/tuna.db → assets/deck.jsonl(提交进仓库)
+uv run scripts/bake.py     # Wiktionary 词源接地 → data/etym_cache.jsonl
+uv run scripts/narrate.py  # 词根聚类 + 受控 LLM → assets/{morphemes,enrichment}.jsonl(提交)
 ```
+
+> 精加工是**离线烤制**、结果提交进仓库,用户零 LLM 成本。`bake.py` 抓 Wiktionary 模板做确定性词源解析,`narrate.py` 只让 LLM 翻译/串词已验证的词素(禁止编造词根)。
 
 ## 耳机门
 

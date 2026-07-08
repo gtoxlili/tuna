@@ -84,20 +84,14 @@ CREATE INDEX IF NOT EXISTS edge_dst ON edge(dst);
 
 -- The knowledge-graph SPINE (架构 星火接线). A canonical morpheme is a first-class
 -- node; words hang off it via word_morpheme; "cognate_root" between two words is the
--- JOIN of their shared morpheme_id, never a stored pair. (P1 grounds these against
--- Wiktionary + canonical variant clustering; P0 seeds them from enrichment units.)
+-- JOIN of their shared morpheme_id, never a stored pair. Fragments Wiktionary cites
+-- per-word (spect / spectāculum / spectate) are reunited by canonicalize_cognates().
 CREATE TABLE IF NOT EXISTS morpheme (
-    id          TEXT PRIMARY KEY,   -- canonical id, e.g. 'la:spec'
-    surface     TEXT,               -- display surface, e.g. 'spect'
-    variants    TEXT,               -- JSON array: ["spec","spect","spic"]
+    id          TEXT PRIMARY KEY,   -- canonical id / surface, e.g. 'spect'
+    surface     TEXT,               -- display surface
     kind        TEXT,               -- prefix / root / suffix
     gloss_zh    TEXT,
-    gloss_en    TEXT,
-    src_lang    TEXT,               -- la / grc / gem-pro / …
-    etymon      TEXT,
-    citation    TEXT,               -- JSON: {rev_id, template, hops[]}
-    confidence  TEXT,               -- cited / needs_review / folk / mnemonic
-    specificity REAL,               -- IDF over the deck (rarer root ⇒ stronger bond)
+    confidence  TEXT,               -- seed / cited / folk / mnemonic
     bond        INTEGER NOT NULL DEFAULT 1  -- 1 = a real derivation bond (root/prefix);
                                     -- 0 = grammatical suffix (-ment/-tion), never an anchor
 );
