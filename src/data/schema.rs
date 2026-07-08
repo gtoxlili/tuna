@@ -70,14 +70,43 @@ CREATE TABLE IF NOT EXISTS enrichment (
     enriched_at          TEXT
 );
 
--- Knowledge-graph edges (from morpheme cognates + the LLM's graph_edges).
+-- Pairwise word↔word edges ONLY (synonym / antonym / confusable). cognate_root is
+-- NEVER stored here — it is derived at query time from the shared morpheme node.
 CREATE TABLE IF NOT EXISTS edge (
     src      TEXT NOT NULL,          -- the enriched word
     dst      TEXT NOT NULL,          -- the related word
-    relation TEXT NOT NULL,          -- cognate_root / synonym / antonym / confusable
-    via      TEXT,                   -- the shared morpheme, when relation = cognate_root
+    relation TEXT NOT NULL,          -- synonym / antonym / confusable
+    why_zh   TEXT,
     PRIMARY KEY (src, dst, relation)
 );
 CREATE INDEX IF NOT EXISTS edge_src ON edge(src);
 CREATE INDEX IF NOT EXISTS edge_dst ON edge(dst);
+
+-- The knowledge-graph SPINE (架构 星火接线). A canonical morpheme is a first-class
+-- node; words hang off it via word_morpheme; "cognate_root" between two words is the
+-- JOIN of their shared morpheme_id, never a stored pair. (P1 grounds these against
+-- Wiktionary + canonical variant clustering; P0 seeds them from enrichment units.)
+CREATE TABLE IF NOT EXISTS morpheme (
+    id          TEXT PRIMARY KEY,   -- canonical id, e.g. 'la:spec'
+    surface     TEXT,               -- display surface, e.g. 'spect'
+    variants    TEXT,               -- JSON array: ["spec","spect","spic"]
+    kind        TEXT,               -- prefix / root / suffix
+    gloss_zh    TEXT,
+    gloss_en    TEXT,
+    src_lang    TEXT,               -- la / grc / gem-pro / …
+    etymon      TEXT,
+    citation    TEXT,               -- JSON: {rev_id, template, hops[]}
+    confidence  TEXT,               -- cited / needs_review / folk / mnemonic
+    specificity REAL                -- IDF over the deck (rarer root ⇒ stronger bond)
+);
+
+CREATE TABLE IF NOT EXISTS word_morpheme (
+    word        TEXT NOT NULL REFERENCES dict(word) ON DELETE CASCADE,
+    morpheme_id TEXT NOT NULL,
+    position    INTEGER,            -- order within the word
+    surface     TEXT,               -- the surface as it appears in THIS word
+    PRIMARY KEY (word, morpheme_id, position)
+);
+CREATE INDEX IF NOT EXISTS wm_morpheme ON word_morpheme(morpheme_id);
+CREATE INDEX IF NOT EXISTS wm_word ON word_morpheme(word);
 "#;

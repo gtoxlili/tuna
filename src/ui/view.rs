@@ -244,19 +244,15 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// A morpheme is "known" when a word you already own shares it.
+/// The morpheme cells. Ownership is no longer a baked flag on the morpheme — it
+/// surfaces through the live "你学过" siblings line (P2 will color cells by real mastery).
 fn morpheme_cells(en: &Enrichment) -> Vec<Span<'static>> {
-    let anchors: Vec<String> = en.known_anchors.iter().map(|a| a.to_lowercase()).collect();
     let mut spans = Vec::new();
     for (i, m) in en.morphemes.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled("   ", Style::default().fg(MUTED)));
         }
-        let known = m
-            .cognates
-            .iter()
-            .any(|cog| anchors.contains(&cog.to_lowercase()));
-        let color = if known { AMBER } else { CURRENT };
+        let color = CURRENT;
         spans.push(Span::styled("⟦ ", Style::default().fg(MUTED)));
         spans.push(Span::styled(
             m.unit.clone(),
@@ -295,17 +291,6 @@ fn morpheme_prompt(lines: &mut Vec<Line>, en: &Enrichment) {
                 Style::default().fg(FOAM_DIM),
             ),
         ]));
-    }
-    if !en.known_anchors.is_empty() {
-        lines.push(Line::raw(""));
-        let mut spans = vec![Span::styled("你已会  ", Style::default().fg(MUTED))];
-        for (i, a) in en.known_anchors.iter().take(5).enumerate() {
-            if i > 0 {
-                spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
-            }
-            spans.push(Span::styled(a.clone(), Style::default().fg(AMBER)));
-        }
-        lines.push(Line::from(spans));
     }
 }
 

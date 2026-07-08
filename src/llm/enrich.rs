@@ -28,8 +28,9 @@ pub struct Enrichment {
     pub derivation_zh: String,
     #[serde(default)]
     pub etymology_confidence: String,
-    #[serde(default)]
-    pub known_anchors: Vec<String>,
+    // NOTE: `known_anchors` was DELETED — personalization is a live JOIN over the
+    // learner's real FSRS state (learned_siblings), never a baked field. serde
+    // ignores the field if present in old asset lines.
     #[serde(default)]
     pub hook: String,
     #[serde(default)]
@@ -98,12 +99,10 @@ pub fn enrich_word(
     word: &str,
     known: &[String],
 ) -> Result<(Enrichment, String, Usage)> {
-    let known_list = if known.is_empty() {
-        "（暂无，请从 CET-4 词中挑选合适锚点）".to_string()
-    } else {
-        known.join(", ")
-    };
-    let user = format!("word: {word}\n该学习者已掌握的同根/基础词: [{known_list}]\n请只输出 json。");
+    // Anchors are NOT the model's job — they are computed live from the learner's
+    // real graph state. Do not inject a fabricated "该学习者已掌握…" here.
+    let _ = known;
+    let user = format!("word: {word}\n请只输出 json。");
     // Polysemous words (state, government) produce long objects; give ample room
     // so the JSON never truncates mid-object.
     let (content, usage) = client.chat_json(model, SYSTEM_PROMPT, &user, 3200)?;

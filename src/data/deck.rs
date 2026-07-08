@@ -42,6 +42,12 @@ pub fn parse_exchange(exchange: &str) -> Vec<(&'static str, String)> {
     out
 }
 
+/// Normalize a morpheme surface into a P0 seed id (strip affix hyphens, lowercase).
+/// P1 replaces this with a Wiktionary-grounded canonical id (e.g. 'la:spec').
+fn normalize_morpheme(unit: &str) -> String {
+    unit.trim().trim_matches(['-', ' ']).to_lowercase()
+}
+
 /// Dictionary facts surfaced in the UI.
 #[derive(Debug, Clone)]
 pub struct DictEntry {
@@ -95,6 +101,15 @@ impl Deck {
             ecdict_path.display()
         );
         let now = Utc::now();
+
+        // The graph schema evolved (edge.via → why_zh; morpheme spine added).
+        // Regenerate, don't migrate — the old free-text `via` is too dirty to salvage.
+        self.conn.execute_batch(
+            "DROP TABLE IF EXISTS edge;
+             DROP TABLE IF EXISTS morpheme;
+             DROP TABLE IF EXISTS word_morpheme;",
+        )?;
+        self.conn.execute_batch(super::schema::SCHEMA)?;
 
         // ATTACH must run outside a transaction.
         self.conn
@@ -287,7 +302,9 @@ impl Deck {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Store an enrichment verbatim + fan its cognate/graph relations into `edge`.
+    /// Store an enrichment verbatim, seed the morpheme spine (word_morpheme links +
+    /// morpheme nodes), and record ONLY pairwise semantic edges. cognate_root is
+    /// never stored — it is derived by JOIN in `learned_siblings`.
     pub fn save_enrichment(&self, e: &Enrichment, raw_json: &str) -> Result<()> {
         let now = Utc::now();
         self.conn.execute(
@@ -295,45 +312,75 @@ impl Deck {
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![e.word, raw_json, e.decomposable as i64, e.etymology_confidence, now],
         )?;
+        // Pairwise word↔word relations only (cognate_root is derived, never stored).
         for ge in &e.graph_edges {
-            if ge.target.is_empty() {
+            if ge.target.is_empty() || !matches!(ge.relation.as_str(), "synonym" | "antonym" | "confusable") {
                 continue;
             }
-            let rel = if ge.relation.is_empty() {
-                "related"
-            } else {
-                ge.relation.as_str()
-            };
             self.conn.execute(
-                "INSERT OR IGNORE INTO edge (src, dst, relation, via) VALUES (?1, ?2, ?3, ?4)",
-                params![e.word, ge.target, rel, ge.via],
+                "INSERT OR IGNORE INTO edge (src, dst, relation, why_zh) VALUES (?1, ?2, ?3, ?4)",
+                params![e.word, ge.target, ge.relation, ge.why_zh],
             )?;
         }
-        for m in &e.morphemes {
-            for cog in &m.cognates {
-                if cog.is_empty() || cog.eq_ignore_ascii_case(&e.word) {
-                    continue;
-                }
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO edge (src, dst, relation, via) VALUES (?1, ?2, 'cognate_root', ?3)",
-                    params![e.word, cog, m.unit],
-                )?;
+        // Seed the spine: each morpheme becomes a node, this word links to it.
+        // P0 uses a unit-normalized id; P1 replaces these with Wiktionary-grounded
+        // canonical nodes (spec/spect/spic → one id).
+        for (i, m) in e.morphemes.iter().enumerate() {
+            let id = normalize_morpheme(&m.unit);
+            if id.is_empty() {
+                continue;
             }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO morpheme (id, surface, kind, gloss_zh, confidence)
+                 VALUES (?1, ?2, ?3, ?4, 'seed')",
+                params![id, m.unit, m.kind, m.meaning_zh],
+            )?;
+            self.conn.execute(
+                "INSERT OR IGNORE INTO word_morpheme (word, morpheme_id, position, surface)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![e.word, id, i as i64, m.unit],
+            )?;
         }
         Ok(())
     }
 
-    /// Deck words you've ALREADY introduced that share a root morpheme with `word` —
-    /// the "you already know these, same root" attach-to-the-known mechanic. Grows
-    /// as you learn: each new word wires into your existing web.
+    /// Load a committed enrichment asset (jsonl, one Enrichment per line) into the deck.
+    /// This is how baked content ships — build-deck calls it so the graph is populated
+    /// with zero runtime LLM.
+    pub fn load_enrichment_asset(&self, path: &Path) -> Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+        let text = std::fs::read_to_string(path)?;
+        let mut n = 0;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let e: Enrichment = match serde_json::from_str(line) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if self.has_word(&e.word)? && self.save_enrichment(&e, line).is_ok() {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Deck words you've ALREADY introduced that share a canonical morpheme with `word`
+    /// — the attach-to-the-known mechanic, derived live by JOIN (never a stored pair).
+    /// Grows as you learn: introducing a word instantly makes it a candidate everywhere.
     pub fn learned_siblings(&self, word: &str) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT e2.src AS sibling, e1.via
-             FROM edge e1
-             JOIN edge e2 ON e2.via = e1.via AND e2.relation = 'cognate_root'
-             JOIN card c ON c.word = e2.src
-             WHERE e1.src = ?1 AND e1.relation = 'cognate_root'
-               AND e2.src <> ?1 AND c.introduced = 1 AND e1.via <> ''
+            "SELECT DISTINCT wm2.word, COALESCE(m.surface, wm1.surface)
+             FROM word_morpheme wm1
+             JOIN word_morpheme wm2
+                  ON wm2.morpheme_id = wm1.morpheme_id AND wm2.word <> wm1.word
+             JOIN card c ON c.word = wm2.word AND c.introduced = 1
+             LEFT JOIN morpheme m ON m.id = wm1.morpheme_id
+             WHERE wm1.word = ?1
              LIMIT 6",
         )?;
         let rows = stmt.query_map(params![word], |r| {

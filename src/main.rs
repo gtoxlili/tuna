@@ -242,11 +242,12 @@ fn build_deck(ecdict: &std::path::Path, deck_path: &std::path::Path) -> Result<(
     println!("\n  building deck from {} …", ecdict.display());
     let mut deck = Deck::open(deck_path)?;
     let n = deck.build_from_ecdict(ecdict)?;
+    let enr = deck.load_enrichment_asset(std::path::Path::new("assets/enrichment.jsonl"))?;
     let s = deck.stats()?;
     println!("  ✓ {n} 考研 words imported → {}", deck_path.display());
     println!(
-        "    words {} · cards {} · new {} · due now {}\n",
-        s.words, s.cards, s.new, s.due_now
+        "    words {} · cards {} · new {} · due now {} · enriched {}\n",
+        s.words, s.cards, s.new, s.due_now, enr
     );
     Ok(())
 }
