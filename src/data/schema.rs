@@ -97,7 +97,9 @@ CREATE TABLE IF NOT EXISTS morpheme (
     etymon      TEXT,
     citation    TEXT,               -- JSON: {rev_id, template, hops[]}
     confidence  TEXT,               -- cited / needs_review / folk / mnemonic
-    specificity REAL                -- IDF over the deck (rarer root ⇒ stronger bond)
+    specificity REAL,               -- IDF over the deck (rarer root ⇒ stronger bond)
+    bond        INTEGER NOT NULL DEFAULT 1  -- 1 = a real derivation bond (root/prefix);
+                                    -- 0 = grammatical suffix (-ment/-tion), never an anchor
 );
 
 CREATE TABLE IF NOT EXISTS word_morpheme (

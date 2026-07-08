@@ -129,6 +129,9 @@ fn bootstrap() -> Result<()> {
     let mut deck = Deck::open(&paths::deck_db())?;
     let n = deck.build_from_asset(assets::DECK)?;
     let enr = deck.load_enrichment_str(assets::ENRICHMENT)?;
+    // Reunite cognate root-fragments (spect/spectāculum/spectate → spect) so the graph
+    // links words that truly share a root. Deterministic + gloss-gated; assets untouched.
+    deck.canonicalize_cognates()?;
     if interactive {
         setup::ready(n, enr);
     } else {

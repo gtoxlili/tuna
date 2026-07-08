@@ -78,6 +78,38 @@ fn normalize_morpheme(unit: &str) -> String {
     unit.trim().to_lowercase()
 }
 
+/// Fold a morpheme surface to a bare ASCII stem for cognate matching: lowercase, drop
+/// Latin macrons/accents to their base letter, keep only letters. So `spectāculum`,
+/// `spectacul`, `-spect` all fold to a form of which `spect` is a clean prefix — no
+/// inflection-stripping needed, the prefix relation does the work.
+fn fold_surface(surface: &str) -> String {
+    surface
+        .chars()
+        .filter_map(|c| match c {
+            'ā' | 'á' | 'à' | 'â' | 'ǎ' | 'ã' | 'ä' => Some('a'),
+            'ē' | 'é' | 'è' | 'ê' | 'ě' | 'ë' => Some('e'),
+            'ī' | 'í' | 'ì' | 'î' | 'ǐ' | 'ï' => Some('i'),
+            'ō' | 'ó' | 'ò' | 'ô' | 'ǒ' | 'õ' | 'ö' => Some('o'),
+            'ū' | 'ú' | 'ù' | 'û' | 'ǔ' | 'ü' => Some('u'),
+            'ȳ' | 'ý' | 'ÿ' => Some('y'),
+            'æ' => Some('a'),
+            c if c.is_ascii_alphabetic() => Some(c.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The Chinese content characters of a gloss, minus grammatical fillers — the gate that
+/// stops `port`(拿/运) from swallowing `portion`(部分): a real cognate merge must share
+/// a meaning character, not just a spelling prefix.
+fn gloss_content(gloss: &str) -> std::collections::BTreeSet<char> {
+    const FILLER: &str = "的了和与或是在也等并及个之其为所被把这那有做作用不无非";
+    gloss
+        .chars()
+        .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c) && !FILLER.contains(*c))
+        .collect()
+}
+
 /// Dictionary facts surfaced in the UI.
 #[derive(Debug, Clone)]
 pub struct DictEntry {
@@ -119,6 +151,15 @@ pub struct MorphemeGroup {
 /// these with another word is grammar, not a derivation bond — kept out of the
 /// constellation. Matched against the de-hyphenated surface so a bare `ion` (from an
 /// inconsistently hyphenated bake) is caught the same as `-ion`.
+/// Whether a shared morpheme is a real *derivation bond* — a root or meaningful prefix
+/// you can build on — versus grammatical scaffolding. A shared root (`spect`) or prefix
+/// (`re-`) bonds two words; a shared suffix (`-ment`, `-tion`) is just grammar. Used both
+/// to filter the constellation and to mark anchor-eligibility (`morpheme.bond`).
+fn is_bond_worthy(surface: &str) -> bool {
+    let core: String = surface.chars().filter(|c| *c != '-').collect();
+    !surface.starts_with('-') && core.len() >= 3 && !is_grammatical_suffix(&core)
+}
+
 fn is_grammatical_suffix(core: &str) -> bool {
     const SUFFIXES: &[&str] = &[
         "ion", "tion", "sion", "ation", "ition", "ive", "ative", "itive", "ate", "ous",
@@ -562,13 +603,9 @@ impl Deck {
 
         let mut out = Vec::new();
         for (id, surface, gloss_zh) in morphs {
-            // A derivation bond is a shared ROOT (no hyphen) or a meaningful PREFIX
-            // (trailing hyphen). A shared grammatical suffix is noise you can't build on.
-            // Leading-hyphen catches most, but the bake hyphenated inconsistently (some
-            // words carry a bare `ion`/`ate`), so gate the de-hyphenated form against the
-            // known closed set of English derivational/inflectional endings too.
-            let core: String = surface.chars().filter(|c| *c != '-').collect();
-            if surface.starts_with('-') || core.len() < 3 || is_grammatical_suffix(&core) {
+            // Only real derivation bonds (roots / meaningful prefixes) — a shared
+            // grammatical suffix is noise you can't build on. Same gate as anchoring.
+            if !is_bond_worthy(&surface) {
                 continue;
             }
             let mut ms = self.conn.prepare(
@@ -601,6 +638,167 @@ impl Deck {
         Ok(out)
     }
 
+    /// Reunite fragmented cognate morpheme nodes. Wiktionary cites a *different immediate
+    /// etymon* per word (inspect→`spect`, spectacle→`spectāculum`, spectator→`spectate`),
+    /// so the same root 看 splinters into several nodes and words that obviously share it
+    /// never share an edge — the constellation and the earned-anchor engine both go thin.
+    ///
+    /// This folds each splinter into the barest real root node it descends from, but only
+    /// when BOTH hold: one folded surface is a proper prefix of the other (≥4 chars), and
+    /// their Chinese glosses share a content character. The gloss gate is what keeps it
+    /// honest — `port`(拿/运) will not swallow `portion`(部分), nor `spec`(种类) `spect`(看),
+    /// even though the spellings nest. Deterministic; logs a sample; returns nodes merged.
+    ///
+    /// Runs once at build time over the whole morpheme table; the shipped assets stay
+    /// exactly as Wiktionary cited them — the merge is a transparent, testable transform.
+    pub fn canonicalize_cognates(&mut self) -> Result<usize> {
+        use std::collections::{BTreeSet, HashMap};
+
+        // Prefixes that must never become the canonical root a longer stem folds into
+        // — else `president`(praesidēns) collapses onto `prae-` and links to `prevent`.
+        // Sub-4 prefixes (pre/pro/sub/con…) are already ineligible via the length gate.
+        const PREFIX_FOLDS: &[&str] = &[
+            "prae", "super", "supra", "hyper", "inter", "intra", "trans", "contra",
+            "circum", "extra", "ultra", "retro", "fore", "anti", "para", "peri",
+        ];
+
+        struct Node {
+            id: String,
+            /// Rank key for canonicity: shorter, un-hyphenated, ASCII, lexical. Lower wins.
+            rank: (usize, u8, u8, String),
+            fold: String,
+            cjk: BTreeSet<char>,
+            root_ok: bool,
+        }
+        let nodes: Vec<Node> = {
+            let mut st = self
+                .conn
+                .prepare("SELECT id, surface, COALESCE(gloss_zh, '') FROM morpheme")?;
+            st.query_map([], |r| {
+                let id: String = r.get(0)?;
+                let surface: String = r.get(1)?;
+                let gloss: String = r.get(2)?;
+                Ok((id, surface, gloss))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(|(id, surface, gloss)| {
+                let disp = if surface.is_empty() { &id } else { &surface };
+                let fold = fold_surface(disp);
+                let hyphen = u8::from(disp.contains('-'));
+                let non_ascii = u8::from(!disp.is_ascii());
+                let root_ok = fold.len() >= 4 && !PREFIX_FOLDS.contains(&fold.as_str());
+                Node {
+                    rank: (fold.len(), hyphen, non_ascii, id.clone()),
+                    fold,
+                    cjk: gloss_content(&gloss),
+                    root_ok,
+                    id,
+                }
+            })
+            .collect()
+        };
+
+        // Each node points at the single MOST-canonical node it descends from: a fold
+        // that is a prefix of its own (equal length allowed — `-spect` and `spect` are
+        // one root), strictly better-ranked, gloss-overlapping, and itself root-eligible.
+        // Strictly-decreasing rank ⇒ no cycles; chains resolve to the barest clean root.
+        let mut parent: HashMap<&str, &str> = HashMap::new();
+        for a in &nodes {
+            if a.fold.len() < 4 {
+                continue;
+            }
+            let mut best: Option<&Node> = None;
+            for r in &nodes {
+                if r.id == a.id
+                    || !r.root_ok
+                    || r.fold.len() > a.fold.len()
+                    || r.rank >= a.rank
+                    || !a.fold.starts_with(&r.fold)
+                    || a.cjk.is_disjoint(&r.cjk)
+                {
+                    continue;
+                }
+                if best.map_or(true, |b| r.rank < b.rank) {
+                    best = Some(r);
+                }
+            }
+            if let Some(r) = best {
+                parent.insert(a.id.as_str(), r.id.as_str());
+            }
+        }
+
+        // Resolve chains (spectāculum → spect) to the ultimate root.
+        let resolve = |start: &str| -> String {
+            let mut cur = start;
+            let mut seen = BTreeSet::new();
+            while let Some(&next) = parent.get(cur) {
+                if !seen.insert(cur) {
+                    break; // cycle guard (unreachable with strict rank, kept for safety)
+                }
+                cur = next;
+            }
+            cur.to_string()
+        };
+
+        let tx = self.conn.transaction()?;
+        let mut merged = 0usize;
+        let mut sample: Vec<String> = Vec::new();
+        for a in &nodes {
+            let root = resolve(&a.id);
+            if root == a.id {
+                continue;
+            }
+            // Repoint this splinter's words onto the root; OR IGNORE drops the row only
+            // when the word already carries the root, then the stragglers are cleared.
+            tx.execute(
+                "UPDATE OR IGNORE word_morpheme SET morpheme_id = ?1 WHERE morpheme_id = ?2",
+                params![root, a.id],
+            )?;
+            tx.execute(
+                "DELETE FROM word_morpheme WHERE morpheme_id = ?1",
+                params![a.id],
+            )?;
+            tx.execute("DELETE FROM morpheme WHERE id = ?1", params![a.id])?;
+            if sample.len() < 8 {
+                sample.push(format!("{}→{}", a.id, root));
+            }
+            merged += 1;
+        }
+        tx.commit()?;
+
+        // Mark anchor-eligibility on every surviving node so a shared grammatical suffix
+        // (`-ment`, `-tion`) can never surface as an "attach to what you know" anchor —
+        // the merge de-hyphenated some suffixes, which would otherwise read as roots.
+        let downgraded = {
+            let survivors: Vec<(String, String)> = {
+                let mut st = self
+                    .conn
+                    .prepare("SELECT id, COALESCE(surface, id) FROM morpheme")?;
+                st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let tx = self.conn.transaction()?;
+            let mut d = 0usize;
+            for (id, surface) in survivors {
+                let disp = if surface.is_empty() { &id } else { &surface };
+                if !is_bond_worthy(disp) {
+                    tx.execute("UPDATE morpheme SET bond = 0 WHERE id = ?1", params![id])?;
+                    d += 1;
+                }
+            }
+            tx.commit()?;
+            d
+        };
+        if merged > 0 || downgraded > 0 {
+            eprintln!(
+                "  · 同源合并 {merged} 个词根碎片，{downgraded} 个语法后缀降级为非锚点（例：{}）",
+                sample.join("、")
+            );
+        }
+        Ok(merged)
+    }
+
     /// A candidate anchor: a learned deck word sharing a root with the new word,
     /// carried with its FSRS card so the caller can score by retrievability.
     pub fn anchor_candidates(&self, word: &str) -> Result<Vec<AnchorCand>> {
@@ -613,7 +811,7 @@ impl Deck {
              FROM word_morpheme wm1
              JOIN word_morpheme wm2
                   ON wm2.morpheme_id = wm1.morpheme_id AND wm2.word <> wm1.word
-             LEFT JOIN morpheme m ON m.id = wm1.morpheme_id
+             JOIN morpheme m ON m.id = wm1.morpheme_id AND m.bond = 1
              JOIN card c ON c.word = wm2.word AND c.introduced = 1
              WHERE wm1.word = ?1",
         )?;
@@ -650,7 +848,7 @@ impl Deck {
              JOIN word_morpheme wm2
                   ON wm2.morpheme_id = wm1.morpheme_id AND wm2.word <> wm1.word
              JOIN card c ON c.word = wm2.word AND c.introduced = 1
-             LEFT JOIN morpheme m ON m.id = wm1.morpheme_id
+             JOIN morpheme m ON m.id = wm1.morpheme_id AND m.bond = 1
              WHERE wm1.word = ?1
              LIMIT 6",
         )?;
@@ -707,6 +905,110 @@ impl Deck {
             ],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk() -> Deck {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(super::super::schema::SCHEMA).unwrap();
+        Deck { conn }
+    }
+    fn morph(d: &Deck, id: &str, surface: &str, gloss: &str) {
+        d.conn
+            .execute(
+                "INSERT INTO morpheme(id, surface, gloss_zh, confidence) VALUES(?1,?2,?3,'seed')",
+                params![id, surface, gloss],
+            )
+            .unwrap();
+    }
+    fn wm(d: &Deck, word: &str, morph_id: &str, pos: i64) {
+        d.conn
+            .execute("INSERT OR IGNORE INTO dict(word) VALUES(?1)", params![word])
+            .unwrap();
+        d.conn
+            .execute(
+                "INSERT INTO word_morpheme(word, morpheme_id, position, surface) VALUES(?1,?2,?3,?2)",
+                params![word, morph_id, pos],
+            )
+            .unwrap();
+    }
+    fn roots(d: &Deck, word: &str) -> Vec<String> {
+        let mut s = d
+            .conn
+            .prepare("SELECT morpheme_id FROM word_morpheme WHERE word=?1 ORDER BY position")
+            .unwrap();
+        s.query_map(params![word], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .unwrap()
+    }
+    fn bond(d: &Deck, id: &str) -> i64 {
+        d.conn
+            .query_row("SELECT bond FROM morpheme WHERE id=?1", params![id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn cognate_merge_reunites_roots_but_gloss_gate_holds() {
+        let mut d = mk();
+        // `spect`=看 fragmented across the Latin etymons Wiktionary cited per word.
+        morph(&d, "spect", "spect", "看");
+        morph(&d, "-spect", "-spect", "看");
+        morph(&d, "spectāculum", "spectāculum", "spect-（看）");
+        morph(&d, "spectate", "spectate", "看");
+        // A spelling-nested FALSE friend: `spec`=种类 must NOT be swallowed by `spect`=看.
+        morph(&d, "spec", "spec", "种类");
+        // `port`=拿/运 must NOT swallow `portiō`=部分 despite the shared prefix.
+        morph(&d, "port", "port", "拿，运");
+        morph(&d, "portiō", "portiō", "部分");
+        // A grammatical suffix: must be downgraded to a non-anchor, never merged as a root.
+        morph(&d, "ment", "ment", "名词后缀");
+
+        wm(&d, "inspect", "spect", 1);
+        wm(&d, "spectacle", "spectāculum", 0);
+        wm(&d, "spectator", "spectate", 0);
+        wm(&d, "species", "spec", 0);
+        wm(&d, "transport", "port", 1);
+        wm(&d, "portion", "portiō", 0);
+        wm(&d, "movement", "ment", 1);
+        wm(&d, "government", "ment", 1);
+
+        let merged = d.canonicalize_cognates().unwrap();
+        assert!(merged >= 3, "spect fragments should merge, got {merged}");
+
+        // Every spect word now hangs on the single bare root.
+        assert_eq!(roots(&d, "spectacle"), vec!["spect"]);
+        assert_eq!(roots(&d, "spectator"), vec!["spect"]);
+        assert!(roots(&d, "inspect").contains(&"spect".to_string()));
+        // Gloss gate: the false friends stay put.
+        assert_eq!(roots(&d, "species"), vec!["spec"]);
+        assert_eq!(roots(&d, "portion"), vec!["portiō"]);
+        assert!(roots(&d, "transport").contains(&"port".to_string()));
+
+        // A grammatical suffix is marked non-bond; a real root stays a bond.
+        assert_eq!(bond(&d, "ment"), 0);
+        assert_eq!(bond(&d, "spect"), 1);
+
+        // movement shares `ment` with government, but a suffix is never an anchor.
+        d.conn
+            .execute(
+                "INSERT INTO card(word,due,stability,difficulty,elapsed_days,scheduled_days,\
+                 reps,lapses,state,last_review,introduced) \
+                 VALUES('movement','2020-01-01T00:00:00Z',10,5,0,0,1,0,2,'2020-01-01T00:00:00Z',1)",
+                [],
+            )
+            .unwrap();
+        let anchors = d.anchor_candidates("government").unwrap();
+        assert!(
+            anchors.iter().all(|a| a.morpheme_id != "ment"),
+            "grammatical suffix `ment` must not surface as an anchor"
+        );
     }
 }
 
