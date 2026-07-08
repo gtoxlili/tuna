@@ -27,6 +27,7 @@ import os
 import re
 import sys
 import threading
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -38,7 +39,7 @@ MORPH_OUT = os.path.join(ROOT, "assets", "morphemes.jsonl")
 ENRICH_OUT = os.path.join(ROOT, "assets", "enrichment.jsonl")
 BASE = "https://api.deepseek.com"
 MODEL = "deepseek-v4-flash"
-WORKERS = 8
+WORKERS = 32
 
 CITED = {"cited-affix", "cited-1hop"}
 
@@ -70,7 +71,9 @@ def read_key():
 
 
 def norm(surface):
-    return surface.strip().strip("-— ").lower()
+    # Keep the hyphen — it encodes position, so a suffix -al never merges with a
+    # prefix al-. Just lowercase + trim whitespace.
+    return surface.strip().lower()
 
 
 def build_morphemes(entries):
@@ -114,16 +117,20 @@ def call(session, key, entry):
         "response_format": {"type": "json_object"},
         "temperature": 0.3, "max_tokens": 1600,
     }
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             r = session.post(f"{BASE}/chat/completions",
                              headers={"Authorization": f"Bearer {key}"}, json=body, timeout=120)
+            if r.status_code == 429 or r.status_code >= 500:
+                time.sleep(min(2 ** attempt, 20))  # throttled — back off, don't skip
+                continue
             r.raise_for_status()
             return json.loads(r.json()["choices"][0]["message"]["content"])
         except Exception as e:  # noqa: BLE001
-            if attempt == 2:
+            if attempt == 4:
                 print(f"  ✗ {word}: {e}", file=sys.stderr, flush=True)
                 return None
+            time.sleep(min(2 ** attempt, 20))
     return None
 
 

@@ -72,10 +72,10 @@ pub fn parse_exchange(exchange: &str) -> Vec<(&'static str, String)> {
     out
 }
 
-/// Normalize a morpheme surface into a P0 seed id (strip affix hyphens, lowercase).
-/// P1 replaces this with a Wiktionary-grounded canonical id (e.g. 'la:spec').
+/// Canonical morpheme id from a surface: lowercase + trim, KEEPING the hyphen so a
+/// suffix `-al` never merges with a prefix `al-` (must match scripts/narrate.py norm()).
 fn normalize_morpheme(unit: &str) -> String {
-    unit.trim().trim_matches(['-', ' ']).to_lowercase()
+    unit.trim().to_lowercase()
 }
 
 /// Dictionary facts surfaced in the UI.
