@@ -32,35 +32,39 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_ask(frame, area, app);
 }
 
-/// The Socratic 辨析 popup, drawn over everything when active.
+/// The Socratic 辨析 popup, drawn over everything when active. The answer is
+/// markdown (DeepSeek emits **bold** and `-` lists), so we parse it to styled
+/// ratatui text rather than printing the raw syntax.
 fn render_ask(frame: &mut Frame, area: Rect, app: &App) {
-    let (title, body, color) = match &app.ask {
+    let plain = |s: &str| Line::from(Span::styled(s.to_string(), Style::default().fg(FOAM)));
+    let (title, color, mut lines) = match &app.ask {
         Ask::Idle => return,
         Ask::Pending => (
             "苏格拉底 · 思考中…",
-            "让 DeepSeek 帮你把它和易混词的分别想清楚……".to_string(),
             MUTED,
+            vec![Line::from(Span::styled(
+                "让 DeepSeek 帮你把它和易混词的分别想清楚……",
+                Style::default().fg(FOAM_DIM),
+            ))],
         ),
-        Ask::Answer(t) => ("苏格拉底 · 辨析", t.clone(), CURRENT),
-        Ask::Failed(e) => ("辨析失败", e.clone(), CORAL),
+        Ask::Answer(t) => ("苏格拉底 · 辨析", CURRENT, tui_markdown::from_str(t).lines),
+        Ask::Failed(e) => ("辨析失败", CORAL, vec![plain(e)]),
     };
-    let popup = centered_rect(72, 72, area);
-    frame.render_widget(Clear, popup);
-    let mut lines: Vec<Line> = body
-        .lines()
-        .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(FOAM))))
-        .collect();
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "a / Esc 关闭",
         Style::default().fg(MUTED),
     )));
+
+    let popup = centered_rect(72, 72, area);
+    frame.render_widget(Clear, popup);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(color))
         .title(format!(" {title} "))
         .title_style(Style::default().fg(color).add_modifier(Modifier::BOLD))
-        .style(Style::default().bg(SLATE))
+        // Base style so unstyled markdown text is readable; bold/headings layer on top.
+        .style(Style::default().bg(SLATE).fg(FOAM))
         .padding(Padding::new(2, 2, 1, 1));
     frame.render_widget(
         Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),

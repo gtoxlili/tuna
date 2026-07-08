@@ -59,6 +59,14 @@ pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
     }
     term.draw(|f| view::render(f, &app))?;
     println!("\n── REVEALED ──\n{}", term.backend());
+
+    // Verify the Socratic popup renders markdown (bold/lists), not raw syntax.
+    app.ask = app::Ask::Answer(
+        "先分别拆开词根：\n- **transport**：trans-（跨）+ port（携带）\n- **transit**：trans-（跨）+ it（走）\n\n提问：运送货物与自身穿越，语义上会导向怎样的不同？\n\n核心差异：**transport** 强调把对象运到另一处；**transit** 只突出经过、中转。"
+            .to_string(),
+    );
+    term.draw(|f| view::render(f, &app))?;
+    println!("\n── SOCRATIC POPUP (markdown) ──\n{}", term.backend());
     Ok(())
 }
 
