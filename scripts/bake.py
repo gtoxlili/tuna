@@ -38,28 +38,43 @@ DB = os.path.join(ROOT, "data", "tuna.db")
 CACHE = os.path.join(ROOT, "data", "etym_cache.jsonl")  # gitignored intermediate
 UA = "tuna-etymology/0.1 (personal study tool; gtoxlili@outlook.com)"
 API = "https://en.wiktionary.org/w/api.php"
-WORKERS = 6
+WORKERS = 3  # Wikimedia API etiquette — low concurrency, retry on throttle
+
+# A word we should NOT re-fetch on resume (i.e. it succeeded). Failed fetches
+# (no-page/error) are retried so a throttled run heals itself on re-run.
+GOOD = {
+    "cited-affix", "cited-1hop", "single-root", "germanic",
+    "no-etymology", "no-templates", "needs-review",
+}
 
 AFFIX_TMPL = {"af", "affix", "prefix", "suffix", "compound", "com", "con", "confix", "surf"}
-ETYMON_TMPL = {"der", "bor", "inh", "inh+", "der+", "bor+"}
-LATINATE = {"la", "grc", "grc-koi", "LL.", "ML.", "la-med"}
+# Wiktionary's newer unified {{ety|LANG|:SUBTYPE|...}} wrapper (politic -al lives here).
+ETY_AFFIX_SUB = {":af", ":affix", ":prefix", ":suffix", ":compound", ":com", ":con", ":confix", ":surf"}
+ETY_DER_SUB = {":der", ":bor", ":inh", ":uder", ":der+", ":bor+"}
+ETYMON_TMPL = {"der", "bor", "inh", "inh+", "der+", "bor+", "uder", "ubor"}
+LATINATE = {"la", "grc", "grc-koi", "grc-gre", "la-med", "la-ecc", "LL.", "ML."}
 
 
 def fetch_wikitext(session, title):
-    """Return (wikitext, rev_id) for a page title, or (None, None)."""
-    r = session.get(
-        API,
-        params={
-            "action": "parse", "page": title, "prop": "wikitext|revid",
-            "format": "json", "formatversion": "2", "redirects": "1",
-        },
-        headers={"User-Agent": UA},
-        timeout=40,
-    )
-    if r.status_code != 200:
-        return None, None
-    d = r.json().get("parse", {})
-    return d.get("wikitext"), d.get("revid")
+    """Return (wikitext, rev_id) for a page title, or (None, None). Retries on throttle."""
+    params = {
+        "action": "parse", "page": title, "prop": "wikitext|revid",
+        "format": "json", "formatversion": "2", "redirects": "1", "maxlag": "5",
+    }
+    for attempt in range(5):
+        try:
+            r = session.get(API, params=params, headers={"User-Agent": UA}, timeout=40)
+            if r.status_code == 200 and "Retry-After" not in r.headers:
+                d = r.json().get("parse", {})
+                if d:
+                    return d.get("wikitext"), d.get("revid")
+                return None, None  # genuine missingtitle / no parse
+            # throttled (429/503) or maxlag — back off and retry
+            wait = float(r.headers.get("Retry-After", 0) or 2 ** attempt)
+            time.sleep(min(max(wait, 1.0), 30.0))
+        except Exception:
+            time.sleep(2 ** attempt)
+    return None, None
 
 
 def section(wt, lang_header):
@@ -89,36 +104,77 @@ def part_surface_gloss(part):
     return surface, gloss
 
 
-def parse_affix(tmpls):
-    """First affix template with ≥2 real parts → [(surface, gloss), …], else None."""
-    for name, args in tmpls:
-        if name not in AFFIX_TMPL:
+def _morphs_from_parts(parts):
+    morphs = []
+    for p in parts:
+        if not p or "=" in p.split("<")[0]:
             continue
+        s, g = part_surface_gloss(p)
+        if s and s not in ("-", ""):
+            morphs.append({"surface": s, "gloss_en": g})
+    return morphs
+
+
+def parse_affix(tmpls):
+    """First affix decomposition with ≥2 real parts → (morphemes, via), else (None, None).
+    Handles both bare {{af|...}} and the {{ety|LANG|:af|...}} wrapper format."""
+    for name, args in tmpls:
         parts = [p.strip() for p in args.split("|")]
-        # drop the leading lang code and any nocat=/pos=/lang= kv args
-        morphs = []
-        for p in parts[1:]:
-            if not p or "=" in p.split("<")[0]:
-                continue
-            s, g = part_surface_gloss(p)
-            if s and s not in ("-", ""):
-                morphs.append({"surface": s, "gloss_en": g})
+        if name in AFFIX_TMPL:
+            morph_parts = parts[1:]  # skip lang
+        elif name == "ety" and len(parts) >= 2 and parts[1] in ETY_AFFIX_SUB:
+            morph_parts = parts[2:]  # skip lang + :subtype
+        else:
+            continue
+        morphs = _morphs_from_parts(morph_parts)
         if len(morphs) >= 2:
-            return morphs, name
+            return morphs, (name if name != "ety" else parts[1].lstrip(":"))
     return None, None
 
 
 def find_etymon(tmpls):
-    """First {{der/bor/inh|en|LANG|WORD}} → (lang, word)."""
+    """All etymon templates → prefer the Latinate one (president goes fro→la).
+    Handles {{der/bor/inh/uder}} and the {{ety|LANG|:der|SRCLANG|WORD}} wrapper."""
+    cands = []
     for name, args in tmpls:
-        if name not in ETYMON_TMPL:
-            continue
         parts = [p.strip() for p in args.split("|")]
-        if len(parts) >= 3 and parts[0] == "en":
-            lang, word = parts[1], part_surface_gloss(parts[2])[0]
-            if word:
-                return lang, word
+        if name in ETYMON_TMPL and len(parts) >= 3 and parts[0] == "en":
+            cands.append((parts[1], part_surface_gloss(parts[2])[0]))
+        elif name == "ety" and len(parts) >= 4 and parts[1] in ETY_DER_SUB and parts[2]:
+            cands.append((parts[2], part_surface_gloss(parts[3])[0]))
+    for lang, word in cands:
+        if lang in LATINATE and word:
+            return lang, word
+    for lang, word in cands:
+        if word:
+            return lang, word
     return None
+
+
+def classify_raw(word, eng, rev, src_ety=None, src=None, src_lang=None, src_rev=None):
+    """S1-S3 parse from RAW etymology text — deterministic, offline, re-runnable."""
+    base = {"word": word, "rev_id": rev, "ety": eng[:2000]}
+    if src_ety is not None:
+        base.update({"src_ety": src_ety[:2000], "src": src, "src_lang": src_lang, "src_rev_id": src_rev})
+    if not eng.strip():
+        return {**base, "category": "no-etymology"}
+    tmpls = templates(eng)
+    morphs, via = parse_affix(tmpls)
+    if morphs:
+        return {**base, "category": "cited-affix", "hop": 0, "via_tmpl": via, "morphemes": morphs}
+    # 1-hop: parse the (already-fetched) Latinate source page
+    if src_ety:
+        m2, via2 = parse_affix(templates(src_ety))
+        if m2:
+            return {**base, "category": "cited-1hop", "hop": 1, "via_tmpl": via2, "morphemes": m2}
+    etymon = find_etymon(tmpls)
+    if etymon and etymon[0] in LATINATE:
+        return {**base, "category": "single-root", "etymon": etymon[1], "src_lang": etymon[0]}
+    if any(n in ("inh", "inh+", "uder") for n, _ in tmpls) or (etymon and etymon[0] in ("enm", "ang", "gem-pro", "non", "fro", "frm")):
+        return {**base, "category": "germanic"}
+    if tmpls:
+        return {**base, "category": "needs-review"}
+    return {**base, "category": "no-templates"}
 
 
 def classify(session, word):
@@ -126,32 +182,18 @@ def classify(session, word):
     if not wt:
         return {"word": word, "category": "no-page"}
     eng = etymology_block(section(wt, "English"))
-    if not eng.strip():
-        return {"word": word, "category": "no-etymology", "rev_id": rev}
     tmpls = templates(eng)
-    morphs, via = parse_affix(tmpls)
-    if morphs:
-        return {"word": word, "category": "cited-affix", "hop": 0, "via_tmpl": via,
-                "morphemes": morphs, "rev_id": rev}
-    etymon = find_etymon(tmpls)
-    if etymon and etymon[0] in LATINATE:
-        lang, src = etymon
-        wt2, rev2 = fetch_wikitext(session, src)
-        if wt2:
-            langname = {"la": "Latin", "grc": "Ancient Greek"}.get(lang, lang)
-            sec2 = etymology_block(section(wt2, langname))
-            m2, via2 = parse_affix(templates(sec2))
-            if m2:
-                return {"word": word, "category": "cited-1hop", "hop": 1, "src": src,
-                        "src_lang": lang, "via_tmpl": via2, "morphemes": m2,
-                        "rev_id": rev, "src_rev_id": rev2}
-        return {"word": word, "category": "single-root", "etymon": src, "src_lang": lang,
-                "rev_id": rev}
-    if any(n in ("inh", "inh+") for n, _ in tmpls):
-        return {"word": word, "category": "germanic", "rev_id": rev}
-    if tmpls:
-        return {"word": word, "category": "needs-review", "rev_id": rev}
-    return {"word": word, "category": "no-templates", "rev_id": rev}
+    # Fetch the Latinate source page up front (for 1-hop) if the English page has no affix.
+    if not parse_affix(tmpls)[0]:
+        etymon = find_etymon(tmpls)
+        if etymon and etymon[0] in LATINATE:
+            lang, src = etymon
+            wt2, rev2 = fetch_wikitext(session, src)
+            if wt2:
+                langname = {"la": "Latin", "grc": "Ancient Greek"}.get(lang, "Latin")
+                sec2 = etymology_block(section(wt2, langname)) or etymology_block(section(wt2, "Latin"))
+                return classify_raw(word, eng, rev, src_ety=sec2, src=src, src_lang=lang, src_rev=rev2)
+    return classify_raw(word, eng, rev)
 
 
 def main():
@@ -160,22 +202,31 @@ def main():
     words = [r[0] for r in con.execute("SELECT word FROM dict ORDER BY priority ASC")]
     con.close()
 
-    done = {}
+    # Load cache keeping the BEST result per word (a GOOD category beats a failed fetch).
+    cached = {}
     if os.path.exists(CACHE):
         with open(CACHE, encoding="utf-8") as f:
             for line in f:
                 try:
-                    o = json.loads(line); done[o["word"]] = o
+                    o = json.loads(line)
                 except Exception:
-                    pass
+                    continue
+                w = o.get("word")
+                if not w:
+                    continue
+                prev = cached.get(w)
+                if prev is None or (o["category"] in GOOD and prev["category"] not in GOOD):
+                    cached[w] = o
+    # A word is "done" only if it succeeded AND we stored its raw etymology (so
+    # parser upgrades force a one-time re-fetch, then re-parse offline forever).
+    done = {w for w, o in cached.items() if o["category"] in GOOD and o.get("ety") is not None}
     todo = [w for w in words if w not in done]
     if limit:
         todo = todo[:limit]
-    print(f"coverage: {len(todo)} to fetch, {len(done)} cached", flush=True)
+    print(f"coverage: {len(todo)} to fetch, {len(done)} good cached", flush=True)
 
     lock = threading.Lock()
     session = requests.Session()
-    results = list(done.values())
     t0 = time.time()
     with open(CACHE, "a", encoding="utf-8") as out, ThreadPoolExecutor(WORKERS) as pool:
         futs = {pool.submit(classify, session, w): w for w in todo}
@@ -186,25 +237,34 @@ def main():
                 res = {"word": futs[fut], "category": "error", "err": str(e)}
             with lock:
                 out.write(json.dumps(res, ensure_ascii=False) + "\n"); out.flush()
-                results.append(res)
+                cached[res["word"]] = res
             if (i + 1) % 100 == 0:
                 print(f"  … {i + 1}/{len(todo)} ({(i+1)/(time.time()-t0):.1f}/s)", flush=True)
 
-    # ── the mirror ──
+    # Rewrite the cache deduped (best per word).
+    with open(CACHE, "w", encoding="utf-8") as f:
+        for o in cached.values():
+            f.write(json.dumps(o, ensure_ascii=False) + "\n")
+    report(list(cached.values()))
+
+
+def report(results):
     from collections import Counter
     cats = Counter(r["category"] for r in results)
-    total = len(results)
+    total = len(results) or 1
     print(f"\n═══ COVERAGE ({total} words) ═══")
     order = ["cited-affix", "cited-1hop", "single-root", "germanic",
              "no-etymology", "no-templates", "needs-review", "no-page", "error"]
-    decomposable = cats["cited-affix"] + cats["cited-1hop"]
+    cited = cats["cited-affix"] + cats["cited-1hop"]
+    with_etymon = cited + cats["single-root"]  # LLM can decompose the cited etymon
     for c in order:
         if cats.get(c):
             bar = "█" * round(40 * cats[c] / total)
             print(f"  {c:14} {cats[c]:5}  {100*cats[c]/total:5.1f}%  {bar}")
-    print(f"\n  DECOMPOSABLE (cited): {decomposable}/{total} = {100*decomposable/total:.1f}%")
-    print(f"  needs-review tail:    {cats.get('needs-review',0)}")
-    # a few real examples
+    print(f"\n  DETERMINISTIC decomposable (cited): {cited}/{total} = {100*cited/total:.1f}%")
+    print(f"  + single-root (LLM decomposes the cited etymon): {100*with_etymon/total:.1f}% grounded total")
+    print(f"  germanic (honest non-decomposable): {cats.get('germanic',0)}")
+    print(f"  needs-review tail: {cats.get('needs-review',0)}")
     print("\n  samples:")
     for c in ("cited-affix", "cited-1hop", "single-root", "germanic"):
         ex = next((r for r in results if r["category"] == c), None)
@@ -212,6 +272,35 @@ def main():
             ms = " + ".join(f"{m['surface']}({m['gloss_en']})" for m in ex.get("morphemes", [])) or ex.get("etymon", "")
             print(f"    {c:12} {ex['word']:14} {ms}")
 
+
+def reclassify():
+    """Offline: re-parse every cached word from its stored raw etymology (no fetch)."""
+    cached = {}
+    with open(CACHE, encoding="utf-8") as f:
+        for line in f:
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            if o.get("word"):
+                cached[o["word"]] = o
+    out = {}
+    for w, o in cached.items():
+        if o.get("ety") is not None:
+            out[w] = classify_raw(w, o["ety"], o.get("rev_id"), o.get("src_ety"),
+                                  o.get("src"), o.get("src_lang"), o.get("src_rev_id"))
+        else:
+            out[w] = o
+    with open(CACHE, "w", encoding="utf-8") as f:
+        for o in out.values():
+            f.write(json.dumps(o, ensure_ascii=False) + "\n")
+    print(f"reclassified {len(out)} cached words (offline)")
+    report(list(out.values()))
+
+
+if __name__ == "__main__" and "--reclassify" in sys.argv:
+    reclassify()
+    raise SystemExit(0)
 
 if __name__ == "__main__":
     raise SystemExit(main())
