@@ -70,6 +70,15 @@ pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
         }
         term.draw(|f| view::render(f, &app))?;
         println!("\n── STRIKE FLIPPED (recall check) ──\n{}", term.backend());
+
+        // arc firing mid-animation (simulate a recall success ~half done)
+        if let Some(c) = app.current.as_mut() {
+            c.strike = app::Strike::Idle;
+        }
+        app.strike_anim =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(450));
+        term.draw(|f| view::render(f, &app))?;
+        println!("\n── STRIKE ARC (mid-fire) ──\n{}", term.backend());
     }
 
     // Verify the Socratic popup renders markdown (bold/lists), not raw syntax.

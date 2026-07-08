@@ -259,7 +259,30 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
                 }
             }
             Strike::Idle => {
-                if !c.siblings.is_empty() {
+                // The earned strike arc, firing from the recalled anchor into the new word.
+                if let (Some(p), Some(a)) = (app.strike_progress(), &c.anchor) {
+                    lines.push(Line::raw(""));
+                    let total = 12usize;
+                    let filled = ((p * total as f64).round() as usize).min(total);
+                    let bar = format!(
+                        "{}{}",
+                        "━".repeat(filled),
+                        "╌".repeat(total - filled)
+                    );
+                    let mut spans = vec![
+                        Span::styled("✦ ", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
+                        Span::styled(a.word.clone(), Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
+                        Span::styled(format!(" {bar}⟶ "), Style::default().fg(AMBER)),
+                        Span::styled(&c.entry.word, Style::default().fg(CURRENT).add_modifier(Modifier::BOLD)),
+                    ];
+                    if p >= 0.9 {
+                        spans.push(Span::styled(
+                            "  ✦ 接入星座",
+                            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                    lines.push(Line::from(spans));
+                } else if !c.siblings.is_empty() {
                     lines.push(Line::raw(""));
                     let mut spans = vec![Span::styled("你学过  ", Style::default().fg(MUTED))];
                     for (i, (w, _)) in c.siblings.iter().take(5).enumerate() {
@@ -551,6 +574,7 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
                     sep(),
                     key("Space", "发音", MUTED),
                     key("a", "辨析", MUTED),
+                    key("w", "词源", MUTED),
                     key("q", "退出", MUTED),
                 ]
             }

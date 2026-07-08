@@ -24,6 +24,7 @@ use crate::llm::DeepSeek;
 const NEW_PER_SESSION: usize = 15;
 const REVIEW_CAP: usize = 300;
 const GATE_POLL: Duration = Duration::from_millis(1000);
+const STRIKE_ANIM_MS: u128 = 900;
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum Stage {
@@ -99,6 +100,8 @@ pub struct App {
     pub input: String,
     /// Animation clock (spinners advance off this).
     pub anim: Instant,
+    /// Set when the 星火接线 arc fires (successful recall) — drives a brief animation.
+    pub strike_anim: Option<Instant>,
     pub queue: Vec<DeckCard>,
     pub pos: usize,
     pub current: Option<CardView>,
@@ -132,6 +135,7 @@ impl App {
             audio_msg: None,
             input: String::new(),
             anim: Instant::now(),
+            strike_anim: None,
             session_total: queue.len(),
             queue,
             pos: 0,
@@ -316,6 +320,7 @@ impl App {
                     self.ask_socratic();
                 }
             }
+            'w' if revealed => self.open_wiktionary(),
             g @ '1'..='4' if revealed => self.grade(g as u8 - b'0')?,
             _ => {}
         }
@@ -387,7 +392,19 @@ impl App {
     }
 
     pub fn is_animating(&self) -> bool {
-        matches!(self.ask, Ask::Pending) || self.tts_pending.is_some()
+        matches!(self.ask, Ask::Pending)
+            || self.tts_pending.is_some()
+            || self
+                .strike_anim
+                .map(|t| t.elapsed().as_millis() < STRIKE_ANIM_MS)
+                .unwrap_or(false)
+    }
+
+    /// Progress 0.0..1.0 of the strike arc, or None when it's not firing.
+    pub fn strike_progress(&self) -> Option<f64> {
+        let t = self.strike_anim?;
+        let p = t.elapsed().as_millis() as f64 / STRIKE_ANIM_MS as f64;
+        (p <= 1.0).then_some(p)
     }
 
     /// Pick the best learned sibling to anchor a new word: a shared root, weighted by
@@ -435,11 +452,12 @@ impl App {
         if let Some(c) = &mut self.current {
             c.strike = Strike::Idle; // resolved — grading the new word is unblocked
         }
-        self.audio_msg = Some(if matches!(rating, rs_fsrs::Rating::Good) {
-            format!("✦ 接线成功  {}  +1 复习", anchor.word)
+        if matches!(rating, rs_fsrs::Rating::Good) {
+            self.strike_anim = Some(Instant::now()); // fire the arc
+            self.audio_msg = Some(format!("✦ 接线成功  {}  +1 复习", anchor.word));
         } else {
-            format!("· 揭示  {}  (记一次待复习)", anchor.word)
-        });
+            self.audio_msg = Some(format!("· 揭示  {}  (记一次待复习)", anchor.word));
+        }
         Ok(())
     }
 
@@ -482,6 +500,22 @@ impl App {
         });
         self.ask_rx = Some(rx);
         self.ask = Ask::Pending;
+    }
+
+    /// Open the current word's Wiktionary etymology in the browser — the citation
+    /// behind every root is one keystroke away. Honesty as a keypress.
+    fn open_wiktionary(&mut self) {
+        let Some(word) = self.current.as_ref().map(|c| c.entry.word.clone()) else {
+            return;
+        };
+        let url = format!("https://en.wiktionary.org/wiki/{word}#English");
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        let _ = std::process::Command::new(opener).arg(&url).spawn();
+        self.audio_msg = Some(format!("↗ Wiktionary · {word}"));
     }
 
     /// Send the learner's OWN derivation guess to DeepSeek for a Socratic critique of
