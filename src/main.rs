@@ -10,8 +10,10 @@ mod config;
 mod data;
 mod llm;
 mod paths;
+mod setup;
 mod ui;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -111,31 +113,36 @@ fn main() -> Result<()> {
 /// embedded assets (no ECDICT, no network).
 fn bootstrap() -> Result<()> {
     paths::ensure_dirs()?;
-    let cfg = paths::config_file();
-    if !cfg.exists() {
-        std::fs::write(&cfg, config::TEMPLATE)?;
-    }
     std::fs::write(paths::root().join("synth.py"), assets::SYNTH_PY)?;
+
+    // First run: the interactive wizard (bind earphone, key, voice model) when
+    // stdout is a terminal; a plain template when piped (CI / non-interactive).
+    let interactive = std::io::stdout().is_terminal();
+    if !paths::config_file().exists() {
+        if interactive {
+            setup::run()?;
+        } else {
+            std::fs::write(paths::config_file(), config::TEMPLATE)?;
+        }
+    }
 
     let mut deck = Deck::open(&paths::deck_db())?;
     let n = deck.build_from_asset(assets::DECK)?;
     let enr = deck.load_enrichment_str(assets::ENRICHMENT)?;
-    println!(
-        "  ✓ 初始化 {} — {n} 词 · {enr} 已精加工",
-        paths::root().display()
-    );
-    println!("    配置: {}", cfg.display());
-    if config::Config::load()?.deepseek.api_key.is_empty() {
-        println!("    提示: 配置里填入 DeepSeek 密钥可启用辨析(学习本身无需密钥)");
+    if interactive {
+        setup::ready(n, enr);
+    } else {
+        println!(
+            "  ✓ 初始化 {} — {n} 词 · {enr} 已精加工",
+            paths::root().display()
+        );
     }
     Ok(())
 }
 
 fn ensure_ready() -> Result<()> {
     if !paths::is_initialized() {
-        println!("\n  首次运行,正在初始化 ~/.tuna …");
         bootstrap()?;
-        println!();
     }
     Ok(())
 }

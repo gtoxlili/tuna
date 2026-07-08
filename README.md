@@ -18,10 +18,10 @@ Rust · [Ratatui](https://ratatui.rs)（TUI）· [cpal](https://github.com/RustA
 
 ```bash
 cargo install --path .     # 或 cargo run --
-tuna                       # 首次运行自动初始化 ~/.tuna,然后开始学习
+tuna                       # 首次运行:三步设置向导,然后开始学习
 ```
 
-首次运行会在 `~/.tuna/` 建好一切:
+首次运行是一个**三步向导**:① 从你连着的蓝牙设备里选一副耳机绑定(只有它连着时才发声)· ② 粘贴 DeepSeek 密钥(可选,学习本身离线可用)· ③ 现在或稍后下载 Kokoro 发音模型。之后在 `~/.tuna/` 建好一切:
 
 | 路径 | 内容 |
 |---|---|
