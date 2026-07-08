@@ -14,7 +14,7 @@ use crate::audio::coreaudio;
 use crate::audio::player::{self, RoutedPlayer};
 use crate::audio::tts::{Tts, TtsServer};
 use crate::config::Config;
-use crate::data::deck::{DeckCard, DictEntry};
+use crate::data::deck::{DeckCard, DictEntry, MorphemeGroup};
 use crate::data::scheduler::rating_from_u8;
 use crate::data::{Deck, Scheduler};
 use crate::llm::enrich::Enrichment;
@@ -111,6 +111,10 @@ pub struct App {
     pub session_reviews: u32,
     pub session_total: usize,
     pub should_quit: bool,
+    /// Whether the constellation (root-family map) overlay is open.
+    pub show_graph: bool,
+    /// The current word's root-family, computed when the overlay opens.
+    pub graph: Vec<MorphemeGroup>,
     // Socratic 辨析 (live DeepSeek on a worker thread)
     pub ask: Ask,
     ask_rx: Option<std::sync::mpsc::Receiver<std::result::Result<String, String>>>,
@@ -148,6 +152,8 @@ impl App {
             session_new: 0,
             session_reviews: 0,
             should_quit: false,
+            show_graph: false,
+            graph: Vec::new(),
             ask: Ask::Idle,
             ask_rx: None,
             ds_base: cfg.deepseek.base_url.clone(),
@@ -231,6 +237,13 @@ impl App {
             if key == 'a' || key == '\x1b' {
                 self.ask = Ask::Idle;
                 self.ask_rx = None;
+            }
+            return Ok(());
+        }
+        // The constellation overlay swallows input; 'g' or Esc closes it.
+        if self.show_graph {
+            if key == 'g' || key == '\x1b' {
+                self.show_graph = false;
             }
             return Ok(());
         }
@@ -321,6 +334,7 @@ impl App {
                 }
             }
             'w' if revealed => self.open_wiktionary(),
+            'g' if revealed => self.open_graph(),
             g @ '1'..='4' if revealed => self.grade(g as u8 - b'0')?,
             _ => {}
         }
@@ -516,6 +530,21 @@ impl App {
         };
         let _ = std::process::Command::new(opener).arg(&url).spawn();
         self.audio_msg = Some(format!("↗ Wiktionary · {word}"));
+    }
+
+    /// Open the constellation — the current word's root-family, the words already lit
+    /// in your galaxy and the frontier that's one root away. Nothing here is invented:
+    /// every edge is a shared morpheme node, every glow is real FSRS stability.
+    fn open_graph(&mut self) {
+        let Some(word) = self.current.as_ref().map(|c| c.entry.word.clone()) else {
+            return;
+        };
+        self.graph = self.deck.constellation(&word).unwrap_or_default();
+        if self.graph.is_empty() {
+            self.audio_msg = Some("这个词没有共享词根的邻居".to_string());
+            return;
+        }
+        self.show_graph = true;
     }
 
     /// Send the learner's OWN derivation guess to DeepSeek for a Socratic critique of

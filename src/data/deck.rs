@@ -99,6 +99,37 @@ pub struct DeckCard {
     pub card: Card,
 }
 
+/// A word hanging off a morpheme node, for the constellation view.
+#[derive(Debug, Clone)]
+pub struct GraphMember {
+    pub word: String,
+    pub introduced: bool,
+    pub stability: f64,
+}
+
+/// A morpheme hub + the words orbiting it.
+#[derive(Debug, Clone)]
+pub struct MorphemeGroup {
+    pub surface: String,
+    pub gloss_zh: String,
+    pub members: Vec<GraphMember>,
+}
+
+/// Closed set of English derivational/inflectional endings. A word sharing one of
+/// these with another word is grammar, not a derivation bond — kept out of the
+/// constellation. Matched against the de-hyphenated surface so a bare `ion` (from an
+/// inconsistently hyphenated bake) is caught the same as `-ion`.
+fn is_grammatical_suffix(core: &str) -> bool {
+    const SUFFIXES: &[&str] = &[
+        "ion", "tion", "sion", "ation", "ition", "ive", "ative", "itive", "ate", "ous",
+        "ious", "eous", "ful", "less", "ness", "ment", "ity", "ety", "cy", "ance",
+        "ence", "ancy", "ency", "able", "ible", "ial", "ical", "ically", "ism", "ist",
+        "ize", "ise", "ify", "ing", "ish", "like", "ward", "wards", "wise", "hood",
+        "ship", "dom", "age", "ery", "ary", "ory", "ling", "some", "teen",
+    ];
+    SUFFIXES.contains(&core)
+}
+
 /// A learned sibling that could anchor a new word — carried with its FSRS card so
 /// the earned-edge engine can score it by retrievability and refresh it on recall.
 #[derive(Debug, Clone)]
@@ -514,6 +545,60 @@ impl Deck {
             }
         }
         Ok(n)
+    }
+
+    /// The local constellation: for each of `word`'s morphemes, the deck words that
+    /// hang off that root — with their learned status + FSRS stability (for glow).
+    /// Only shows real, cited shared-morpheme edges; nothing is inferred.
+    pub fn constellation(&self, word: &str) -> Result<Vec<MorphemeGroup>> {
+        let mut ids = self.conn.prepare(
+            "SELECT wm.morpheme_id, COALESCE(m.surface, wm.surface), COALESCE(m.gloss_zh, '')
+             FROM word_morpheme wm LEFT JOIN morpheme m ON m.id = wm.morpheme_id
+             WHERE wm.word = ?1",
+        )?;
+        let morphs: Vec<(String, String, String)> = ids
+            .query_map(params![word], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut out = Vec::new();
+        for (id, surface, gloss_zh) in morphs {
+            // A derivation bond is a shared ROOT (no hyphen) or a meaningful PREFIX
+            // (trailing hyphen). A shared grammatical suffix is noise you can't build on.
+            // Leading-hyphen catches most, but the bake hyphenated inconsistently (some
+            // words carry a bare `ion`/`ate`), so gate the de-hyphenated form against the
+            // known closed set of English derivational/inflectional endings too.
+            let core: String = surface.chars().filter(|c| *c != '-').collect();
+            if surface.starts_with('-') || core.len() < 3 || is_grammatical_suffix(&core) {
+                continue;
+            }
+            let mut ms = self.conn.prepare(
+                "SELECT wm.word, c.introduced, c.stability
+                 FROM word_morpheme wm JOIN card c ON c.word = wm.word
+                 WHERE wm.morpheme_id = ?1
+                 ORDER BY c.introduced DESC, c.stability DESC, wm.word",
+            )?;
+            let members: Vec<GraphMember> = ms
+                .query_map(params![id], |r| {
+                    Ok(GraphMember {
+                        word: r.get(0)?,
+                        introduced: r.get::<_, i64>(1)? != 0,
+                        stability: r.get(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            // ≥2 words to be a family; skip a hyper-generic connective that would be a
+            // wall of unrelated words instead of a legible root neighbourhood.
+            if members.len() > 1 && members.len() <= 60 {
+                out.push(MorphemeGroup {
+                    surface,
+                    gloss_zh,
+                    members,
+                });
+            }
+        }
+        // Rarest roots first — a shared spect is a tighter bond than a shared re-.
+        out.sort_by_key(|g| g.members.len());
+        Ok(out)
     }
 
     /// A candidate anchor: a learned deck word sharing a root with the new word,

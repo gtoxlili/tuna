@@ -3,7 +3,7 @@
 //! the ZH meaning you arrive at glows amber.
 
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::Frame;
@@ -37,6 +37,143 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
     render_keybar(frame, chunks[2], app);
     render_ask(frame, area, app);
+    render_constellation(frame, area, app);
+}
+
+/// The constellation overlay: the current word's root-family, drawn as morpheme hubs
+/// with the deck words orbiting each. Every edge is a real shared node; a word glows
+/// only if you've actually learned it (green = FSRS-solid, amber = still fresh); the
+/// dim ones are the frontier — each is one root away from being derivable, not rote.
+fn render_constellation(frame: &mut Frame, area: Rect, app: &App) {
+    if !app.show_graph {
+        return;
+    }
+    let word = app
+        .current
+        .as_ref()
+        .map(|c| c.entry.word.as_str())
+        .unwrap_or("");
+
+    // Solid ≥21d of memory stability, fresh below; the current word is teal.
+    let glow = |m: &crate::data::deck::GraphMember| -> (Color, &'static str) {
+        if m.word == word {
+            (CURRENT, "◉")
+        } else if !m.introduced {
+            (MUTED, "·")
+        } else if m.stability >= 21.0 {
+            (GREEN, "✦")
+        } else {
+            (AMBER, "✦")
+        }
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    let mut lit_total = 0usize;
+    let mut orbit_total = 0usize;
+    for g in &app.graph {
+        // Order the orbit: current word first, then what's lit (steadiest first),
+        // then the dim frontier — capped so a noisy suffix like -tion stays readable.
+        let mut ms = g.members.clone();
+        ms.sort_by(|a, b| {
+            let rank = |m: &crate::data::deck::GraphMember| {
+                if m.word == word {
+                    0
+                } else if m.introduced {
+                    1
+                } else {
+                    2
+                }
+            };
+            rank(a)
+                .cmp(&rank(b))
+                .then(b.stability.total_cmp(&a.stability))
+                .then(a.word.cmp(&b.word))
+        });
+        let lit = ms.iter().filter(|m| m.introduced).count();
+        lit_total += lit;
+        orbit_total += ms.len();
+
+        let gloss = if g.gloss_zh.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", g.gloss_zh)
+        };
+        lines.push(Line::from(vec![
+            Span::styled("词根 ", Style::default().fg(MUTED)),
+            Span::styled(
+                g.surface.clone(),
+                Style::default().fg(FOAM).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(gloss, Style::default().fg(FOAM_DIM)),
+            Span::styled(
+                format!("   ✦ 点亮 {}/{}", lit, ms.len()),
+                Style::default().fg(MUTED),
+            ),
+        ]));
+
+        const CAP: usize = 18;
+        let hidden = ms.len().saturating_sub(CAP);
+        let mut chips: Vec<Span> = Vec::new();
+        for m in ms.iter().take(CAP) {
+            let (color, mark) = glow(m);
+            let style = if m.word == word {
+                Style::default().fg(color).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(color)
+            };
+            chips.push(Span::styled(format!("{mark} {}   ", m.word), style));
+        }
+        if hidden > 0 {
+            chips.push(Span::styled(
+                format!("+{hidden} …"),
+                Style::default().fg(MUTED),
+            ));
+        }
+        lines.push(Line::from(chips));
+        lines.push(Line::raw(""));
+    }
+
+    // Header + a one-line honest summary of what's real here.
+    let mut head = vec![
+        Line::from(vec![
+            Span::styled("✦ 星座 · ", Style::default().fg(CURRENT)),
+            Span::styled(
+                word.to_string(),
+                Style::default().fg(FOAM).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("你的星系里，这些根上已点亮 {lit_total}/{orbit_total} 颗"),
+            Style::default().fg(FOAM_DIM),
+        )),
+        Line::raw(""),
+    ];
+    head.append(&mut lines);
+    head.push(Line::from(vec![
+        Span::styled("◉ 当前   ", Style::default().fg(CURRENT)),
+        Span::styled("✦ 已点亮", Style::default().fg(GREEN)),
+        Span::styled("(越绿越稳固)   ", Style::default().fg(MUTED)),
+        Span::styled("· 待解锁", Style::default().fg(MUTED)),
+        Span::styled("(只差这个词根)", Style::default().fg(MUTED)),
+    ]));
+    head.push(Line::from(Span::styled(
+        "g / Esc 关闭",
+        Style::default().fg(MUTED),
+    )));
+
+    let popup = centered_rect(78, 82, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(CURRENT))
+        .title(" 星座 · 词根家族 ")
+        .title_style(Style::default().fg(CURRENT).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(SLATE).fg(FOAM))
+        .padding(Padding::new(2, 2, 1, 1));
+    frame.render_widget(
+        Paragraph::new(head).block(block).wrap(Wrap { trim: false }),
+        popup,
+    );
 }
 
 /// The Socratic 辨析 popup, drawn over everything when active. The answer is
@@ -575,6 +712,7 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
                     key("Space", "发音", MUTED),
                     key("a", "辨析", MUTED),
                     key("w", "词源", MUTED),
+                    key("g", "星座", MUTED),
                     key("q", "退出", MUTED),
                 ]
             }
