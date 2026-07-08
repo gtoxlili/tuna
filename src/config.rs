@@ -96,7 +96,6 @@ impl Config {
             voices: paths::kokoro_voices(),
             voice: self.tts.voice.clone(),
             speed: self.tts.speed,
-            sidecar: paths::root().join("synth.py"),
         }
     }
 

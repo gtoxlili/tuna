@@ -81,6 +81,13 @@ enum Cmd {
         #[arg(long)]
         word: Option<String>,
     },
+    /// [dev] Synthesize a word to a WAV via the embedded Kokoro engine (no playback).
+    #[command(hide = true)]
+    Synth {
+        text: String,
+        #[arg(long, default_value = "/tmp/tuna-synth.wav")]
+        out: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -106,14 +113,51 @@ fn main() -> Result<()> {
             ensure_ready()?;
             ui::preview(&paths::deck_db(), word)
         }
+        Some(Cmd::Synth { text, out }) => synth_probe(&text, &out),
     }
 }
 
-/// First run: create ~/.tuna, drop the config + sidecar, build the DB from the
-/// embedded assets (no ECDICT, no network).
+/// [dev] Synthesize a word through the embedded Kokoro engine and report clip stats —
+/// proves the pure-Rust ort + misaki-rs pipeline end to end without needing playback.
+fn synth_probe(text: &str, out: &std::path::Path) -> Result<()> {
+    let cfg = config::Config::load()?;
+    let tts = cfg.tts_engine();
+    anyhow::ensure!(
+        tts.models_present(),
+        "Kokoro model missing under {} — run setup or set TUNA_HOME.",
+        paths::tts_dir().display()
+    );
+    let mut server = audio::tts::TtsServer::start(&tts)?;
+    let t0 = std::time::Instant::now();
+    server.synth(text, out, &tts.voice, tts.speed)?;
+    let reader = hound::WavReader::open(out)?;
+    let spec = reader.spec();
+    let samples: Vec<f32> = reader
+        .into_samples::<i16>()
+        .filter_map(|s| s.ok())
+        .map(|s| s as f32 / i16::MAX as f32)
+        .collect();
+    let n = samples.len();
+    let secs = n as f32 / spec.sample_rate as f32;
+    let rms = (samples.iter().map(|s| s * s).sum::<f32>() / n.max(1) as f32).sqrt();
+    let peak = samples.iter().fold(0f32, |m, s| m.max(s.abs()));
+    println!(
+        "  ✓ synth {text:?} → {}\n    {} samples · {:.2}s @ {}Hz · rms {:.4} · peak {:.3}",
+        out.display(),
+        n,
+        secs,
+        spec.sample_rate,
+        rms,
+        peak
+    );
+    println!("    首次合成耗时 {:.1}s（含图优化）", t0.elapsed().as_secs_f32());
+    Ok(())
+}
+
+/// First run: create ~/.tuna, drop the config, build the DB from the embedded
+/// assets (no ECDICT, no network). TTS is embedded (ort + misaki-rs) — no sidecar.
 fn bootstrap() -> Result<()> {
     paths::ensure_dirs()?;
-    std::fs::write(paths::root().join("synth.py"), assets::SYNTH_PY)?;
 
     // First run: the interactive wizard (bind earphone, key, voice model) when
     // stdout is a terminal; a plain template when piped (CI / non-interactive).

@@ -7,6 +7,3 @@ pub const DECK: &str = include_str!("../assets/deck.jsonl");
 
 /// Baked per-word enrichment (morphemes, derivation, examples, edges).
 pub const ENRICHMENT: &str = include_str!("../assets/enrichment.jsonl");
-
-/// The Kokoro TTS sidecar, written to ~/.tuna/synth.py on first run.
-pub const SYNTH_PY: &str = include_str!("../sidecar/synth.py");

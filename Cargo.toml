@@ -9,6 +9,11 @@ chrono = "0.4.45"
 clap = { version = "4.6.1", features = ["derive"] }
 core-foundation = "0.10.1"
 coreaudio-sys = "0.2.18"
+# Local Kokoro TTS, pure Rust, single self-contained binary — no Python/uv/espeak.
+ort = "=2.0.0-rc.10"                                   # ONNX Runtime, statically linked
+misaki-rs = { version = "0.3.0", default-features = false }  # pure-Rust G2P (no espeak/C dep)
+zip = { version = "2", default-features = false, features = ["deflate"] }  # voices .npz reader
+hound = "3.5.1"                                         # WAV writer for the clip cache
 ratatui = "0.30.2"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "default-tls"] }
 rodio = "0.22.2"

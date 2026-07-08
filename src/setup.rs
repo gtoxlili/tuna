@@ -3,7 +3,7 @@
 //! voice model. Styled in the deep-water palette; falls back to a template when
 //! stdin isn't a terminal (CI / piped).
 
-use std::io::Write;
+use std::io::{Read, Write};
 
 use anyhow::Result;
 
@@ -138,52 +138,102 @@ fn step_key() -> String {
     key
 }
 
+/// The two Kokoro assets tuna needs to speak: the quantized voice model + the voice
+/// style pack. Same files whether inference runs on ort or elsewhere.
+const MODEL_BASE: &str =
+    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0";
+
 fn step_model() {
     println!("\n  {} {}", paint(TEAL, &bold("③")), bold("发音模型（Kokoro）"));
     println!(
         "     {}",
-        paint(MUTED, "本地 TTS，约 120MB。也可以以后第一次按 Space 时懒下载。")
+        paint(MUTED, "本地 TTS，约 110MB。下齐才进入学习——之后按 Space 即刻发声，无需联网。")
     );
-    if paths::kokoro_model().exists() {
-        println!("     {}", paint(GREEN, "✓ 已存在，跳过"));
-        return;
-    }
-    let yn = prompt(&format!(
-        "     {} ",
-        paint(TEAL, "▸ 现在下载？(y / 回车稍后):")
-    ));
-    if !yn.eq_ignore_ascii_case("y") {
-        println!("     {}", paint(MUTED, "· 稍后——按 Space 会自动下并合成"));
-        return;
-    }
     let files = [
         ("kokoro-v1.0.int8.onnx", paths::kokoro_model()),
         ("voices-v1.0.bin", paths::kokoro_voices()),
     ];
-    let base = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0";
-    for (name, dst) in files {
-        println!("     {}", paint(MUTED, &format!("↓ {name} …")));
-        let status = std::process::Command::new("curl")
-            .args([
-                "-L",
-                "--progress-bar",
-                "-o",
-                &dst.to_string_lossy(),
-                &format!("{base}/{name}"),
-            ])
-            .status();
-        match status {
-            Ok(s) if s.success() => {}
-            _ => {
-                println!(
-                    "     {}",
-                    paint(CORAL, "· 下载失败（稍后按 Space 会重试懒下载）")
-                );
-                return;
+    if files.iter().all(|(_, p)| p.exists()) {
+        println!("     {}", paint(GREEN, "✓ 已就位，跳过"));
+        return;
+    }
+    for (name, dst) in &files {
+        if dst.exists() {
+            continue;
+        }
+        loop {
+            match download_with_progress(&format!("{MODEL_BASE}/{name}"), dst, name) {
+                Ok(()) => break,
+                Err(e) => {
+                    println!("\n     {}", paint(CORAL, &format!("· 下载失败：{e}")));
+                    let again = prompt(&format!(
+                        "     {} ",
+                        paint(TEAL, "▸ 重试？(y / 回车跳过，首次按 Space 时再下):")
+                    ));
+                    if !again.eq_ignore_ascii_case("y") {
+                        println!(
+                            "     {}",
+                            paint(MUTED, "· 跳过——发音将在首次按 Space 时补下")
+                        );
+                        return;
+                    }
+                }
             }
         }
     }
     println!("     {}", paint(GREEN, "✓ 模型就位"));
+}
+
+/// Stream a URL to `dest` with a live, deep-water progress bar — pure Rust (reqwest),
+/// no `curl` on the host. Writes to a `.part` file and renames on success so a killed
+/// download never leaves a half-file that looks complete.
+pub fn download_with_progress(url: &str, dest: &std::path::Path, label: &str) -> Result<()> {
+    let client = reqwest::blocking::Client::builder().timeout(None).build()?;
+    let mut resp = client.get(url).send()?.error_for_status()?;
+    let total = resp.content_length().unwrap_or(0);
+    let tmp = dest.with_extension("part");
+    let mut file = std::fs::File::create(&tmp)?;
+    let mut buf = [0u8; 64 * 1024];
+    let mut done: u64 = 0;
+    let mut last = 0u64;
+    loop {
+        let n = resp.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buf[..n])?;
+        done += n as u64;
+        if done - last >= 512 * 1024 {
+            render_bar(label, done, total.max(done));
+            last = done;
+        }
+    }
+    file.flush()?;
+    drop(file);
+    std::fs::rename(&tmp, dest)?;
+    render_bar(label, done, done);
+    println!("  {}", paint(GREEN, "✓"));
+    Ok(())
+}
+
+fn render_bar(label: &str, done: u64, total: u64) {
+    const WIDTH: usize = 26;
+    let frac = if total > 0 {
+        (done as f64 / total as f64).min(1.0)
+    } else {
+        0.0
+    };
+    let filled = (frac * WIDTH as f64).round() as usize;
+    let mb = |b: u64| b as f64 / 1_048_576.0;
+    print!(
+        "\r     {} {}{} {} {}",
+        paint(FOAM, &format!("↓ {label:<22}")),
+        paint(TEAL, &"━".repeat(filled)),
+        paint(MUTED, &"╌".repeat(WIDTH.saturating_sub(filled))),
+        paint(AMBER, &format!("{:>3.0}%", frac * 100.0)),
+        paint(MUTED, &format!("{:.1}/{:.1} MB", mb(done), mb(total))),
+    );
+    std::io::stdout().flush().ok();
 }
 
 fn write_config(needle: &str, key: &str) -> Result<()> {
