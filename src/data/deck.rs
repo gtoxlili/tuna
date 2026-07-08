@@ -9,6 +9,7 @@ use rs_fsrs::{Card, Rating, ReviewLog};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::scheduler::state_from_i64;
+use crate::llm::enrich::Enrichment;
 
 /// The 11 card columns, in the order `row_to_deckcard` expects.
 const CARD_COLS: &str = "c.word, c.due, c.stability, c.difficulty, c.elapsed_days, \
@@ -264,6 +265,85 @@ impl Deck {
             ],
         )?;
         Ok(())
+    }
+
+    /// Words not yet enriched, in frequency order (so we spend LLM budget on the
+    /// words you'll meet soonest).
+    pub fn words_to_enrich(&self, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.word FROM dict d LEFT JOIN enrichment e ON e.word = d.word
+             WHERE e.word IS NULL ORDER BY d.priority ASC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Store an enrichment verbatim + fan its cognate/graph relations into `edge`.
+    pub fn save_enrichment(&self, e: &Enrichment, raw_json: &str) -> Result<()> {
+        let now = Utc::now();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO enrichment (word, json, decomposable, etymology_confidence, enriched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![e.word, raw_json, e.decomposable as i64, e.etymology_confidence, now],
+        )?;
+        for ge in &e.graph_edges {
+            if ge.target.is_empty() {
+                continue;
+            }
+            let rel = if ge.relation.is_empty() {
+                "related"
+            } else {
+                ge.relation.as_str()
+            };
+            self.conn.execute(
+                "INSERT OR IGNORE INTO edge (src, dst, relation, via) VALUES (?1, ?2, ?3, ?4)",
+                params![e.word, ge.target, rel, ge.via],
+            )?;
+        }
+        for m in &e.morphemes {
+            for cog in &m.cognates {
+                if cog.is_empty() || cog.eq_ignore_ascii_case(&e.word) {
+                    continue;
+                }
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO edge (src, dst, relation, via) VALUES (?1, ?2, 'cognate_root', ?3)",
+                    params![e.word, cog, m.unit],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read a word's enrichment, if it has been enriched.
+    pub fn enrichment(&self, word: &str) -> Result<Option<Enrichment>> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT json FROM enrichment WHERE word = ?1",
+                params![word],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match json {
+            Some(j) => Ok(Some(serde_json::from_str(&j)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Is this word in the 考研 deck? (enrichment requires it — FK to dict.)
+    pub fn has_word(&self, word: &str) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM dict WHERE word = ?1",
+            params![word],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn enriched_count(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM enrichment", [], |r| r.get(0))?)
     }
 
     /// Append a review-log entry.

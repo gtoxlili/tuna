@@ -37,6 +37,10 @@ cargo run -- deck-info         # 查看统计与队列
 | `tuna gate-test [needle]` | 播一段测试音，**只**走绑定的耳机；耳机不在场则静默（fail-closed） |
 | `tuna build-deck` | 从 ECDICT 构建考研牌组 |
 | `tuna deck-info` | 牌组统计 + 频率序队列预览 |
+| `tuna enrich --limit N` | 用 DeepSeek 精加工 N 个词（词素/推导/图边/例句），存入牌组 |
+| `tuna`（或 `tuna study`） | 开始学习会话 |
+
+DeepSeek 密钥放在 `tuna.toml`（已 gitignore）或 `$DEEPSEEK_API_KEY`。精加工是离线批处理：夜里把明天要见的词跑一遍，桌前零延迟、全静默。系统提示是 byte-stable 前缀，命中 DeepSeek 的 prompt-cache，整轮成本约几美元。
 
 ## 耳机门
 
@@ -47,7 +51,7 @@ cargo run -- deck-info         # 查看统计与队列
 - **M0** 耳机门 + CoreAudio 枚举 ✓
 - **M1** 数据管线（ECDICT → 考研牌组 → FSRS/SQLite）✓
 - **M2** 复习循环 + Ratatui 界面（拆·联·验 + 耳机门指示 + FSRS 间隔预览）✓
-- **M3** DeepSeek 词条精加工 + 词根图
+- **M3** DeepSeek 词条精加工（词素/推导链/诚实词源/例句）+ 词根图边 + 拆·联 界面 ✓
 - **M4** Kokoro TTS 离线预合成
 - **M5** 打磨（tachyonfx、真题语料、个人 FSRS 权重）
 

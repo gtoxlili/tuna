@@ -13,6 +13,7 @@ use crate::audio::coreaudio;
 use crate::data::deck::{DeckCard, DictEntry};
 use crate::data::scheduler::rating_from_u8;
 use crate::data::{Deck, Scheduler};
+use crate::llm::enrich::Enrichment;
 
 /// Introductions per session — the comfortable 2028 pace (leaves room for reviews).
 const NEW_PER_SESSION: usize = 15;
@@ -35,6 +36,8 @@ pub struct GateStatus {
 pub struct CardView {
     pub dc: DeckCard,
     pub entry: DictEntry,
+    /// DeepSeek enrichment (morphemes/derivation/graph), if this word has it.
+    pub enrichment: Option<Enrichment>,
     /// Phase A (拆·联, first meeting) vs Phase B (验, retrieval).
     pub is_new: bool,
     pub stage: Stage,
@@ -87,9 +90,11 @@ impl App {
         while self.pos < self.queue.len() {
             let dc = self.queue[self.pos].clone();
             if let Some(entry) = self.deck.entry(&dc.word)? {
+                let enrichment = self.deck.enrichment(&dc.word).unwrap_or(None);
                 self.current = Some(CardView {
                     is_new: !dc.introduced,
                     entry,
+                    enrichment,
                     dc,
                     stage: Stage::Prompt,
                 });
@@ -99,6 +104,27 @@ impl App {
             self.pos += 1;
         }
         Ok(())
+    }
+
+    /// Load a specific word as the current Phase-A card (for previews/tests).
+    pub fn force_card(&mut self, word: &str) -> Result<bool> {
+        if let Some(entry) = self.deck.entry(word)? {
+            let enrichment = self.deck.enrichment(word).unwrap_or(None);
+            self.current = Some(CardView {
+                dc: DeckCard {
+                    word: word.to_string(),
+                    introduced: false,
+                    card: rs_fsrs::Card::new(),
+                },
+                entry,
+                enrichment,
+                is_new: true,
+                stage: Stage::Prompt,
+            });
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub fn done(&self) -> bool {

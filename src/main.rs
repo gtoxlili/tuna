@@ -5,7 +5,9 @@
 //! bound earphone and *only* there, and that its absence means silence.
 
 mod audio;
+mod config;
 mod data;
+mod llm;
 mod ui;
 
 use std::path::PathBuf;
@@ -62,6 +64,20 @@ enum Cmd {
     RenderPreview {
         #[arg(long, default_value = "data/tuna.db")]
         deck: PathBuf,
+        /// Preview a specific word (else the queue front).
+        #[arg(long)]
+        word: Option<String>,
+    },
+    /// Enrich words with DeepSeek (morphemes, derivation, graph edges, examples).
+    Enrich {
+        #[arg(long, default_value = "data/tuna.db")]
+        deck: PathBuf,
+        /// How many not-yet-enriched words to process this run.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Enrich one specific word instead (repeatable), regardless of order.
+        #[arg(long)]
+        word: Vec<String>,
     },
 }
 
@@ -73,8 +89,69 @@ fn main() -> Result<()> {
         Some(Cmd::BuildDeck { ecdict, deck }) => build_deck(&ecdict, &deck),
         Some(Cmd::DeckInfo { deck }) => deck_info(&deck),
         Some(Cmd::Study { deck, needle }) => ui::run(&deck, needle),
-        Some(Cmd::RenderPreview { deck }) => ui::preview(&deck, "airpods".to_string()),
+        Some(Cmd::RenderPreview { deck, word }) => ui::preview(&deck, "airpods".to_string(), word),
+        Some(Cmd::Enrich { deck, limit, word }) => enrich(&deck, limit, word),
     }
+}
+
+fn enrich(deck_path: &std::path::Path, limit: usize, words_arg: Vec<String>) -> Result<()> {
+    let cfg = config::Config::load()?;
+    let key = cfg.require_key()?;
+    let client = llm::DeepSeek::new(cfg.deepseek.base_url.clone(), key.to_string());
+    let deck = Deck::open(deck_path)?;
+
+    let words = if words_arg.is_empty() {
+        deck.words_to_enrich(limit)?
+    } else {
+        words_arg
+    };
+    if words.is_empty() {
+        println!("\n  nothing to enrich — every word is done.\n");
+        return Ok(());
+    }
+    println!(
+        "\n  enriching {} word(s) with {} …\n",
+        words.len(),
+        cfg.deepseek.enrich_model
+    );
+
+    let (mut prompt, mut cached, mut completion, mut ok) = (0u64, 0u64, 0u64, 0usize);
+    for (i, w) in words.iter().enumerate() {
+        let tag = format!("[{:>3}/{}] {:<18}", i + 1, words.len(), w);
+        if !deck.has_word(w)? {
+            println!("  {tag} ⤳ 跳过（不在考研牌组内）");
+            continue;
+        }
+        match llm::enrich::enrich_word(&client, &cfg.deepseek.enrich_model, w, &[]) {
+            Ok((e, raw, usage)) => {
+                prompt += usage.prompt;
+                cached += usage.cached;
+                completion += usage.completion;
+                if let Err(err) = deck.save_enrichment(&e, &raw) {
+                    println!("  {tag} ✗ 存储失败: {err}");
+                    continue;
+                }
+                ok += 1;
+                let conf = if e.etymology_confidence.is_empty() {
+                    "?"
+                } else {
+                    &e.etymology_confidence
+                };
+                let deriv: String = e.derivation_zh.chars().take(34).collect();
+                println!(
+                    "  {tag} {conf:<8} {}morph {}edge  {deriv}",
+                    e.morphemes.len(),
+                    e.graph_edges.len(),
+                );
+            }
+            Err(err) => println!("  {tag} ✗ {err}"),
+        }
+    }
+    println!(
+        "\n  ✓ {ok}/{} enriched · tokens: prompt {prompt} (cached {cached}) + completion {completion}\n",
+        words.len()
+    );
+    Ok(())
 }
 
 fn build_deck(ecdict: &std::path::Path, deck_path: &std::path::Path) -> Result<()> {

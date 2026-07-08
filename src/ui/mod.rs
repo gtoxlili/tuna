@@ -30,7 +30,7 @@ pub fn run(deck_path: &Path, needle: String) -> Result<()> {
 
 /// Render the study screen to an in-memory buffer and print it as text — lets us
 /// verify layout/content without an interactive TTY. Shows both card stages.
-pub fn preview(deck_path: &Path, needle: String) -> Result<()> {
+pub fn preview(deck_path: &Path, needle: String, word: Option<String>) -> Result<()> {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -39,7 +39,13 @@ pub fn preview(deck_path: &Path, needle: String) -> Result<()> {
         println!("deck empty — run `tuna build-deck` first");
         return Ok(());
     }
-    let mut term = Terminal::new(TestBackend::new(96, 20))?;
+    if let Some(w) = word {
+        if !app.force_card(&w)? {
+            println!("'{w}' not in deck");
+            return Ok(());
+        }
+    }
+    let mut term = Terminal::new(TestBackend::new(96, 24))?;
 
     term.draw(|f| view::render(f, &app))?;
     println!("── PROMPT ──\n{}", term.backend());

@@ -59,4 +59,25 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- DeepSeek enrichment: the full JSON stored verbatim, plus a couple of columns
+-- pulled out for filtering. (M3)
+CREATE TABLE IF NOT EXISTS enrichment (
+    word                 TEXT PRIMARY KEY REFERENCES dict(word) ON DELETE CASCADE,
+    json                 TEXT NOT NULL,
+    decomposable         INTEGER,
+    etymology_confidence TEXT,      -- solid / folk / mnemonic
+    enriched_at          TEXT
+);
+
+-- Knowledge-graph edges (from morpheme cognates + the LLM's graph_edges).
+CREATE TABLE IF NOT EXISTS edge (
+    src      TEXT NOT NULL,          -- the enriched word
+    dst      TEXT NOT NULL,          -- the related word
+    relation TEXT NOT NULL,          -- cognate_root / synonym / antonym / confusable
+    via      TEXT,                   -- the shared morpheme, when relation = cognate_root
+    PRIMARY KEY (src, dst, relation)
+);
+CREATE INDEX IF NOT EXISTS edge_src ON edge(src);
+CREATE INDEX IF NOT EXISTS edge_dst ON edge(dst);
 "#;
