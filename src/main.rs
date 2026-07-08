@@ -56,9 +56,6 @@ enum Cmd {
     Study {
         #[arg(long, default_value = "data/tuna.db")]
         deck: PathBuf,
-        /// Name substring of the earphone to gate audio on.
-        #[arg(long, default_value = "airpods")]
-        needle: String,
     },
     /// Render the study screen to text (both card stages) for verification.
     RenderPreview {
@@ -67,6 +64,17 @@ enum Cmd {
         /// Preview a specific word (else the queue front).
         #[arg(long)]
         word: Option<String>,
+    },
+    /// Pre-synthesize pronunciation audio (words + enriched examples) via Kokoro.
+    Synth {
+        #[arg(long, default_value = "data/tuna.db")]
+        deck: PathBuf,
+        /// How many top-frequency words to synthesize.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Also synthesize each enriched word's example sentences.
+        #[arg(long, default_value_t = true)]
+        examples: bool,
     },
     /// Enrich words with DeepSeek (morphemes, derivation, graph edges, examples).
     Enrich {
@@ -83,15 +91,61 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        None => ui::run(&PathBuf::from("data/tuna.db"), "airpods".to_string()),
+        None => ui::run(&PathBuf::from("data/tuna.db")),
         Some(Cmd::Probe) => probe(),
         Some(Cmd::GateTest { needle }) => gate_test(&needle),
         Some(Cmd::BuildDeck { ecdict, deck }) => build_deck(&ecdict, &deck),
         Some(Cmd::DeckInfo { deck }) => deck_info(&deck),
-        Some(Cmd::Study { deck, needle }) => ui::run(&deck, needle),
-        Some(Cmd::RenderPreview { deck, word }) => ui::preview(&deck, "airpods".to_string(), word),
+        Some(Cmd::Study { deck }) => ui::run(&deck),
+        Some(Cmd::RenderPreview { deck, word }) => ui::preview(&deck, word),
         Some(Cmd::Enrich { deck, limit, word }) => enrich(&deck, limit, word),
+        Some(Cmd::Synth {
+            deck,
+            limit,
+            examples,
+        }) => synth(&deck, limit, examples),
     }
+}
+
+fn synth(deck_path: &std::path::Path, limit: usize, examples: bool) -> Result<()> {
+    let cfg = config::Config::load()?;
+    let tts = cfg.tts_engine();
+    if !tts.models_present() {
+        anyhow::bail!(
+            "Kokoro model not found at {} — download it (see README).",
+            tts.model.display()
+        );
+    }
+    let deck = Deck::open(deck_path)?;
+    let words = deck.top_words(limit)?;
+
+    // The word itself (pronunciation) + optionally its enriched example sentences.
+    let mut texts = Vec::new();
+    for w in &words {
+        texts.push(w.clone());
+        if examples {
+            if let Some(en) = deck.enrichment(w)? {
+                for ex in en.examples.iter().take(2) {
+                    if !ex.en.trim().is_empty() {
+                        texts.push(ex.en.clone());
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "\n  synthesizing up to {} clips ({} words + examples) with voice {} …\n",
+        texts.len(),
+        words.len(),
+        cfg.tts.voice
+    );
+    let made = tts.synth_batch(&texts)?;
+    println!(
+        "\n  ✓ {made} new clip(s) → {} ({} total requested)\n",
+        tts.cache_dir.display(),
+        texts.len()
+    );
+    Ok(())
 }
 
 fn enrich(deck_path: &std::path::Path, limit: usize, words_arg: Vec<String>) -> Result<()> {

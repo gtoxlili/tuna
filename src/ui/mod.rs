@@ -12,8 +12,11 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
 use app::App;
 
-pub fn run(deck_path: &Path, needle: String) -> Result<()> {
-    let mut app = App::new(deck_path, needle)?;
+use crate::config::Config;
+
+pub fn run(deck_path: &Path) -> Result<()> {
+    let cfg = Config::load()?;
+    let mut app = App::new(deck_path, &cfg)?;
 
     // Guard: an unbuilt deck should point the user at `build-deck`, not show
     // a hollow "session complete" screen.
@@ -30,11 +33,12 @@ pub fn run(deck_path: &Path, needle: String) -> Result<()> {
 
 /// Render the study screen to an in-memory buffer and print it as text — lets us
 /// verify layout/content without an interactive TTY. Shows both card stages.
-pub fn preview(deck_path: &Path, needle: String, word: Option<String>) -> Result<()> {
+pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    let mut app = App::new(deck_path, needle)?;
+    let cfg = Config::load()?;
+    let mut app = App::new(deck_path, &cfg)?;
     if app.deck.stats()?.cards == 0 {
         println!("deck empty — run `tuna build-deck` first");
         return Ok(());

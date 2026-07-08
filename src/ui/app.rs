@@ -10,6 +10,9 @@ use anyhow::Result;
 use chrono::Utc;
 
 use crate::audio::coreaudio;
+use crate::audio::player::{self, RoutedPlayer};
+use crate::audio::tts::Tts;
+use crate::config::Config;
 use crate::data::deck::{DeckCard, DictEntry};
 use crate::data::scheduler::rating_from_u8;
 use crate::data::{Deck, Scheduler};
@@ -47,6 +50,11 @@ pub struct App {
     pub deck: Deck,
     pub scheduler: Scheduler,
     pub needle: String,
+    pub tts: Tts,
+    /// Playback stream, held open only while the earphone is present.
+    player: Option<RoutedPlayer>,
+    /// Transient one-line audio feedback (e.g. "尚未合成发音").
+    pub audio_msg: Option<String>,
     pub queue: Vec<DeckCard>,
     pub pos: usize,
     pub current: Option<CardView>,
@@ -59,13 +67,16 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(deck_path: &Path, needle: String) -> Result<Self> {
+    pub fn new(deck_path: &Path, cfg: &Config) -> Result<Self> {
         let deck = Deck::open(deck_path)?;
         let queue = deck.session_queue(Utc::now(), NEW_PER_SESSION, REVIEW_CAP)?;
         let mut app = Self {
             deck,
             scheduler: Scheduler::default(),
-            needle,
+            needle: cfg.gate.needle.clone(),
+            tts: cfg.tts_engine(),
+            player: None,
+            audio_msg: None,
             session_total: queue.len(),
             queue,
             pos: 0,
@@ -136,15 +147,17 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: char) -> Result<()> {
+        self.audio_msg = None;
         match key {
             'q' => self.should_quit = true,
-            '\n' | '\r' | ' ' => {
+            '\n' | '\r' => {
                 if let Some(c) = &mut self.current {
                     if c.stage == Stage::Prompt {
                         c.stage = Stage::Revealed;
                     }
                 }
             }
+            ' ' => self.play_audio(),
             g @ '1'..='4' => {
                 let is_revealed = matches!(
                     self.current.as_ref().map(|c| c.stage),
@@ -157,6 +170,46 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Play the current word's pronunciation — only through the bound earphone.
+    fn play_audio(&mut self) {
+        let Some(word) = self.current.as_ref().map(|c| c.entry.word.clone()) else {
+            return;
+        };
+        if !self.gate.open {
+            self.audio_msg = Some("耳机未连接 · 静默".to_string());
+            return;
+        }
+        let path = self.tts.cache_path(&word);
+        if !path.exists() {
+            self.audio_msg = Some("尚未合成发音（tuna synth）".to_string());
+            return;
+        }
+        if self.ensure_player() {
+            if let Some(p) = &self.player {
+                match p.play_file(&path) {
+                    Ok(()) => self.audio_msg = Some(format!("♪ {word}")),
+                    Err(_) => self.audio_msg = Some("播放失败".to_string()),
+                }
+            }
+        } else {
+            self.audio_msg = Some("无法打开耳机输出".to_string());
+        }
+    }
+
+    /// Ensure a playback stream bound to the earphone exists. Returns whether one is ready.
+    fn ensure_player(&mut self) -> bool {
+        if self.player.is_some() {
+            return true;
+        }
+        if let Some(device) = player::find_output_device(&self.needle) {
+            if let Ok(p) = RoutedPlayer::open(device) {
+                self.player = Some(p);
+                return true;
+            }
+        }
+        false
     }
 
     fn grade(&mut self, n: u8) -> Result<()> {
@@ -205,26 +258,18 @@ impl App {
             return;
         }
         self.last_gate_poll = Instant::now();
-        match coreaudio::enumerate() {
-            Ok(devices) => {
-                if let Some(d) = coreaudio::find_bound_output(&devices, &self.needle) {
-                    self.gate = GateStatus {
-                        open: true,
-                        device: Some(d.name.clone()),
-                    };
-                } else {
-                    self.gate = GateStatus {
-                        open: false,
-                        device: None,
-                    };
-                }
-            }
-            Err(_) => {
-                self.gate = GateStatus {
-                    open: false,
-                    device: None,
-                };
-            }
+        let open_device = match coreaudio::enumerate() {
+            Ok(devices) => coreaudio::find_bound_output(&devices, &self.needle).map(|d| d.name.clone()),
+            Err(_) => None,
+        };
+        self.gate = GateStatus {
+            open: open_device.is_some(),
+            device: open_device,
+        };
+        // Drop the playback stream the moment the earphone leaves — a mid-session
+        // disconnect becomes instant silence, and we reopen on the next play.
+        if !self.gate.open {
+            self.player = None;
         }
     }
 }

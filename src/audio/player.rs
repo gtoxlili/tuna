@@ -2,6 +2,7 @@
 //! the system default. If the bound earphone is absent we simply hold no stream —
 //! there is no speaker stream to leak from. That is the earphone gate.
 
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -44,6 +45,16 @@ impl RoutedPlayer {
             player,
             device_name,
         })
+    }
+
+    /// Play a cached audio file on the bound device. Non-blocking: it queues onto
+    /// the player's own audio thread and returns immediately, so the UI stays live.
+    pub fn play_file(&self, path: &Path) -> Result<()> {
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("opening audio {}", path.display()))?;
+        let decoder = rodio::Decoder::try_from(file).context("decoding audio")?;
+        self.player.append(decoder);
+        Ok(())
     }
 
     /// A short, unobtrusive confirmation chime (a rising two-note motif) so the

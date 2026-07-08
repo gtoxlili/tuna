@@ -2,3 +2,4 @@
 
 pub mod coreaudio;
 pub mod player;
+pub mod tts;

@@ -369,6 +369,7 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
         match app.current.as_ref().map(|c| c.stage) {
             Some(Stage::Prompt) => vec![
                 key("Enter", "揭示", CURRENT),
+                key("Space", "发音", MUTED),
                 sep(),
                 key("q", "退出", MUTED),
             ],
@@ -380,6 +381,7 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
                     grade_key("3", "Good", &hints[2], GREEN),
                     grade_key("4", "Easy", &hints[3], CURRENT),
                     sep(),
+                    key("Space", "发音", MUTED),
                     key("q", "退出", MUTED),
                 ]
             }
@@ -388,6 +390,15 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
     let mut flat = Vec::new();
     for group in spans {
         flat.extend(group);
+    }
+    // Transient audio feedback, shown left of the keys.
+    if let Some(msg) = &app.audio_msg {
+        let mut with_msg = vec![Span::styled(
+            format!(" {msg}   "),
+            Style::default().fg(CURRENT),
+        )];
+        with_msg.extend(flat);
+        flat = with_msg;
     }
     frame.render_widget(
         Paragraph::new(Line::from(flat)).style(Style::default().bg(SLATE)),
