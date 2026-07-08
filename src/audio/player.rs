@@ -35,10 +35,13 @@ impl RoutedPlayer {
     /// Open a stream bound to `device`.
     pub fn open(device: cpal::Device) -> Result<Self> {
         let device_name = device_name(&device).unwrap_or_else(|| "unknown".to_string());
-        let sink = DeviceSinkBuilder::from_device(device)
+        let mut sink = DeviceSinkBuilder::from_device(device)
             .context("could not build sink for the bound device")?
             .open_stream()
             .context("could not open an audio stream on the bound device")?;
+        // Silence rodio's "Dropping DeviceSink…" line — it would corrupt the TUI
+        // when the stream is torn down on disconnect/quit.
+        sink.log_on_drop(false);
         let player = Player::connect_new(sink.mixer());
         Ok(Self {
             _sink: sink,
