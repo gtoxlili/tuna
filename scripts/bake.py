@@ -38,7 +38,7 @@ DB = os.path.join(ROOT, "data", "tuna.db")
 CACHE = os.path.join(ROOT, "data", "etym_cache.jsonl")  # gitignored intermediate
 UA = "tuna-etymology/0.1 (personal study tool; gtoxlili@outlook.com)"
 API = "https://en.wiktionary.org/w/api.php"
-WORKERS = 3  # Wikimedia API etiquette — low concurrency, retry on throttle
+WORKERS = 5  # Wikimedia API etiquette — low concurrency, retry on throttle
 
 # A word we should NOT re-fetch on resume (i.e. it succeeded). Failed fetches
 # (no-page/error) are retried so a throttled run heals itself on re-run.
@@ -202,7 +202,11 @@ def main():
     words = [r[0] for r in con.execute("SELECT word FROM dict ORDER BY priority ASC")]
     con.close()
 
-    # Load cache keeping the BEST result per word (a GOOD category beats a failed fetch).
+    # Load cache keeping the BEST result per word: a GOOD category beats a failed
+    # fetch, and (tie-break) a result WITH raw etymology beats one without.
+    def rank(x):
+        return (x["category"] in GOOD, x.get("ety") is not None)
+
     cached = {}
     if os.path.exists(CACHE):
         with open(CACHE, encoding="utf-8") as f:
@@ -215,7 +219,7 @@ def main():
                 if not w:
                     continue
                 prev = cached.get(w)
-                if prev is None or (o["category"] in GOOD and prev["category"] not in GOOD):
+                if prev is None or rank(o) > rank(prev):
                     cached[w] = o
     # A word is "done" only if it succeeded AND we stored its raw etymology (so
     # parser upgrades force a one-time re-fetch, then re-parse offline forever).
