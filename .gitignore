@@ -14,3 +14,7 @@
 # macOS
 .DS_Store
 /data/etym_cache.jsonl
+
+# Python
+__pycache__/
+*.pyc
