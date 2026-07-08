@@ -10,6 +10,37 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::scheduler::state_from_i64;
 
+/// The 11 card columns, in the order `row_to_deckcard` expects.
+const CARD_COLS: &str = "c.word, c.due, c.stability, c.difficulty, c.elapsed_days, \
+     c.scheduled_days, c.reps, c.lapses, c.state, c.last_review, c.introduced";
+
+/// Parse ECDICT's `exchange` field (e.g. "p:ran/d:run/i:running/3:runs/0:run")
+/// into labelled word-family forms — real graph data we have before any LLM.
+pub fn parse_exchange(exchange: &str) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    for part in exchange.split('/') {
+        let Some((code, form)) = part.split_once(':') else {
+            continue;
+        };
+        let label = match code {
+            "p" => "过去式",
+            "d" => "过去分词",
+            "i" => "现在分词",
+            "3" => "三单",
+            "r" => "比较级",
+            "t" => "最高级",
+            "s" => "复数",
+            "0" => "原形",
+            "1" => "词根", // lemma transformation flags; shown as a link cue
+            _ => continue,
+        };
+        if !form.trim().is_empty() {
+            out.push((label, form.trim().to_string()));
+        }
+    }
+    out
+}
+
 /// Dictionary facts surfaced in the UI.
 #[derive(Debug, Clone)]
 pub struct DictEntry {
@@ -161,16 +192,55 @@ impl Deck {
     /// The next batch to study: due cards first (by due time), then not-yet-introduced
     /// New cards in priority (frequency) order.
     pub fn next_queue(&self, now: DateTime<Utc>, limit: usize) -> Result<Vec<DeckCard>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT c.word, c.due, c.stability, c.difficulty, c.elapsed_days, c.scheduled_days,
-                    c.reps, c.lapses, c.state, c.last_review, c.introduced
+        let sql = format!(
+            "SELECT {CARD_COLS}
              FROM card c JOIN dict d ON d.word = c.word
              WHERE c.due <= ?1
              ORDER BY c.introduced ASC, d.priority ASC, c.due ASC
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![now, limit as i64], row_to_deckcard)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// A study session: first the due *reviews* (time-sensitive), then up to
+    /// `new_limit` fresh words in frequency order. On day one this is just the
+    /// new intake; later it clears the review backlog before introducing more.
+    pub fn session_queue(
+        &self,
+        now: DateTime<Utc>,
+        new_limit: usize,
+        review_limit: usize,
+    ) -> Result<Vec<DeckCard>> {
+        let review_sql = format!(
+            "SELECT {CARD_COLS}
+             FROM card c JOIN dict d ON d.word = c.word
+             WHERE c.introduced = 1 AND c.due <= ?1
+             ORDER BY c.due ASC LIMIT ?2"
+        );
+        let new_sql = format!(
+            "SELECT {CARD_COLS}
+             FROM card c JOIN dict d ON d.word = c.word
+             WHERE c.introduced = 0
+             ORDER BY d.priority ASC LIMIT ?1"
+        );
+        let mut out = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(&review_sql)?;
+            let rows = stmt.query_map(params![now, review_limit as i64], row_to_deckcard)?;
+            for r in rows {
+                out.push(r?);
+            }
+        }
+        {
+            let mut stmt = self.conn.prepare(&new_sql)?;
+            let rows = stmt.query_map(params![new_limit as i64], row_to_deckcard)?;
+            for r in rows {
+                out.push(r?);
+            }
+        }
+        Ok(out)
     }
 
     /// Persist a card's new FSRS state (and whether it has been introduced).

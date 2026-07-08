@@ -46,7 +46,7 @@ cargo run -- deck-info         # 查看统计与队列
 
 - **M0** 耳机门 + CoreAudio 枚举 ✓
 - **M1** 数据管线（ECDICT → 考研牌组 → FSRS/SQLite）✓
-- **M2** 复习循环 + Ratatui 界面（拆·联·验）
+- **M2** 复习循环 + Ratatui 界面（拆·联·验 + 耳机门指示 + FSRS 间隔预览）✓
 - **M3** DeepSeek 词条精加工 + 词根图
 - **M4** Kokoro TTS 离线预合成
 - **M5** 打磨（tachyonfx、真题语料、个人 FSRS 权重）

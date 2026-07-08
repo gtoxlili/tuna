@@ -6,6 +6,7 @@
 
 mod audio;
 mod data;
+mod ui;
 
 use std::path::PathBuf;
 
@@ -20,8 +21,9 @@ use data::Deck;
 #[derive(Parser)]
 #[command(name = "tuna", version, about = "考研英语 · 词根推导终端")]
 struct Cli {
+    /// No subcommand starts a study session.
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -48,14 +50,30 @@ enum Cmd {
         #[arg(long, default_value = "data/tuna.db")]
         deck: PathBuf,
     },
+    /// Start a study session (this is also the default with no subcommand).
+    Study {
+        #[arg(long, default_value = "data/tuna.db")]
+        deck: PathBuf,
+        /// Name substring of the earphone to gate audio on.
+        #[arg(long, default_value = "airpods")]
+        needle: String,
+    },
+    /// Render the study screen to text (both card stages) for verification.
+    RenderPreview {
+        #[arg(long, default_value = "data/tuna.db")]
+        deck: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Probe => probe(),
-        Cmd::GateTest { needle } => gate_test(&needle),
-        Cmd::BuildDeck { ecdict, deck } => build_deck(&ecdict, &deck),
-        Cmd::DeckInfo { deck } => deck_info(&deck),
+        None => ui::run(&PathBuf::from("data/tuna.db"), "airpods".to_string()),
+        Some(Cmd::Probe) => probe(),
+        Some(Cmd::GateTest { needle }) => gate_test(&needle),
+        Some(Cmd::BuildDeck { ecdict, deck }) => build_deck(&ecdict, &deck),
+        Some(Cmd::DeckInfo { deck }) => deck_info(&deck),
+        Some(Cmd::Study { deck, needle }) => ui::run(&deck, needle),
+        Some(Cmd::RenderPreview { deck }) => ui::preview(&deck, "airpods".to_string()),
     }
 }
 

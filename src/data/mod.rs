@@ -9,3 +9,4 @@ pub mod scheduler;
 pub mod schema;
 
 pub use deck::Deck;
+pub use scheduler::Scheduler;
