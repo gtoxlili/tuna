@@ -4,10 +4,12 @@
 //! stdin isn't a terminal (CI / piped).
 
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::audio::coreaudio;
+use crate::audio::probe::{self, DeviceInfo};
+use crate::audio::tts::{from_kind, TtsEngineKind};
 use crate::paths;
 
 // ── deep-water palette (ANSI truecolor) ──
@@ -41,8 +43,8 @@ pub fn run() -> Result<()> {
     banner();
     let needle = step_earphone();
     let key = step_key();
-    step_model();
-    write_config(&needle, &key)?;
+    let (engine, voice) = step_engine();
+    init_config(&needle, &key, &engine, &voice)?;
     Ok(())
 }
 
@@ -80,16 +82,19 @@ fn step_earphone() -> String {
         paint(MUTED, "只有它连着时 tuna 才发声。办公室里，静默是默认。")
     );
 
-    let devices = coreaudio::enumerate().unwrap_or_default();
-    let bt: Vec<&coreaudio::CoreAudioDevice> = devices
+    let devices = probe::current_probe().enumerate().unwrap_or_default();
+    // macOS filters to bluetooth-class devices (AirPods HFP/A2DP duplicates need the
+    // filter). Linux/Windows can't see transport via cpal 0.17, so list every output
+    // device and let the user pick — with a warning that ALSA names can drift.
+    let candidates: Vec<&DeviceInfo> = devices
         .iter()
-        .filter(|d| d.is_output() && d.is_bluetooth())
+        .filter(|d| d.is_output() && gate_candidate(d))
         .collect();
 
-    if bt.is_empty() {
+    if candidates.is_empty() {
         println!(
             "     {}",
-            paint(MUTED, "（暂未检测到蓝牙耳机——连上后重开也行，或先输入名字）")
+            paint(MUTED, "（暂未检测到合适的输出设备——连上后重开也行，或先输入名字）")
         );
         let s = prompt(&format!(
             "     {} ",
@@ -99,7 +104,14 @@ fn step_earphone() -> String {
     }
 
     println!("     {}", paint(MUTED, "选一副绑定:"));
-    for (i, d) in bt.iter().enumerate() {
+    #[cfg(not(target_os = "macos"))]
+    {
+        println!(
+            "     {}",
+            paint(MUTED, "（非 macOS：ALSA/WASAPI 设备名可能随重启漂移，如绑定失效请重跑 setup）")
+        );
+    }
+    for (i, d) in candidates.iter().enumerate() {
         println!(
             "       {}  {}",
             paint(AMBER, &format!("{}", i + 1)),
@@ -110,14 +122,29 @@ fn step_earphone() -> String {
         "     {} ",
         paint(TEAL, "▸ 输入编号（回车用 1）:")
     ));
-    let idx = pick.parse::<usize>().ok().filter(|n| *n >= 1 && *n <= bt.len());
-    let chosen = &bt[idx.map(|n| n - 1).unwrap_or(0)];
+    let idx = pick.parse::<usize>().ok().filter(|n| *n >= 1 && *n <= candidates.len());
+    let chosen = &candidates[idx.map(|n| n - 1).unwrap_or(0)];
     println!(
         "     {} {}",
         paint(GREEN, "✓ 已绑定"),
         paint(FOAM, &chosen.name)
     );
     chosen.name.clone()
+}
+
+/// Whether a device is a candidate for the earphone gate. On macOS we filter to
+/// bluetooth-class devices (the AirPods use case); elsewhere we accept any output
+/// device because cpal 0.17 doesn't expose transport metadata.
+fn gate_candidate(d: &DeviceInfo) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        d.is_bluetooth()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = d;
+        true
+    }
 }
 
 fn step_key() -> String {
@@ -138,31 +165,71 @@ fn step_key() -> String {
     key
 }
 
-/// The two Kokoro assets tuna needs to speak: the quantized voice model + the voice
-/// style pack. Same files whether inference runs on ort or elsewhere.
-const MODEL_BASE: &str =
-    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0";
-
-fn step_model() {
-    println!("\n  {} {}", paint(TEAL, &bold("③")), bold("发音模型（Kokoro）"));
+/// The engine picker: list Kokoro/Matcha/Piper with footprints + blurbs, let the
+/// user choose, migrate any stale ort-pipeline files, then download + extract the
+/// chosen engine's files. Returns `(engine_id, default_voice_id)` for init_config.
+fn step_engine() -> (String, String) {
+    println!("\n  {} {}", paint(TEAL, &bold("③")), bold("发音引擎"));
     println!(
         "     {}",
-        paint(MUTED, "本地 TTS，约 110MB。下齐才进入学习——之后按 Space 即刻发声，无需联网。")
+        paint(MUTED, "本地 TTS，三个引擎任选。下齐才进入学习——之后按 Space 即刻发声。")
     );
-    let files = [
-        ("kokoro-v1.0.int8.onnx", paths::kokoro_model()),
-        ("voices-v1.0.bin", paths::kokoro_voices()),
-    ];
-    if files.iter().all(|(_, p)| p.exists()) {
-        println!("     {}", paint(GREEN, "✓ 已就位，跳过"));
-        return;
+
+    let kinds = TtsEngineKind::all();
+    for (i, kind) in kinds.iter().enumerate() {
+        let eng = from_kind(*kind);
+        let tag = if i == 0 { "  推荐" } else { "" };
+        println!(
+            "       {}  {} · {} · ~{}MB{}",
+            paint(AMBER, &format!("{}", i + 1)),
+            paint(FOAM, &bold(kind.id())),
+            eng.blurb(),
+            eng.footprint_mb(),
+            paint(MUTED, tag)
+        );
     }
-    for (name, dst) in &files {
-        if dst.exists() {
-            continue;
-        }
+
+    let pick = prompt(&format!(
+        "     {} ",
+        paint(TEAL, "▸ 输入编号（回车用 1）:")
+    ));
+    let idx = pick
+        .parse::<usize>()
+        .ok()
+        .filter(|n| *n >= 1 && *n <= kinds.len());
+    let chosen = kinds[idx.map(|n| n - 1).unwrap_or(0)];
+    let eng = from_kind(chosen);
+    let voice = eng.default_voice().id;
+    println!(
+        "     {} {}",
+        paint(GREEN, "✓ 已选"),
+        paint(FOAM, &format!("{} · {}", chosen.id(), eng.blurb()))
+    );
+
+    migrate_old_files();
+
+    let engine_dir = paths::engine_dir(chosen);
+    if eng.models_present(&engine_dir) {
+        println!("     {}", paint(GREEN, "✓ 模型已就位，跳过"));
+        return (chosen.id().to_string(), voice);
+    }
+
+    std::fs::create_dir_all(&engine_dir).ok();
+    for dl in eng.downloads() {
         loop {
-            match download_with_progress(&format!("{MODEL_BASE}/{name}"), dst, name) {
+            let is_tarball = dl
+                .dest
+                .extension()
+                .map(|e| e == "bz2")
+                .unwrap_or(false);
+            let result = if is_tarball {
+                download_and_extract(&dl, &engine_dir)
+            } else {
+                let dst = engine_dir.join(&dl.dest);
+                std::fs::create_dir_all(dst.parent().unwrap()).ok();
+                download_with_progress(&dl.url, &dst, &dl.label)
+            };
+            match result {
                 Ok(()) => break,
                 Err(e) => {
                     println!("\n     {}", paint(CORAL, &format!("· 下载失败：{e}")));
@@ -175,13 +242,65 @@ fn step_model() {
                             "     {}",
                             paint(MUTED, "· 跳过——发音将在首次按 Space 时补下")
                         );
-                        return;
+                        return (chosen.id().to_string(), voice);
                     }
                 }
             }
         }
     }
     println!("     {}", paint(GREEN, "✓ 模型就位"));
+    (chosen.id().to_string(), voice)
+}
+
+/// Download a `.tar.bz2` to a temp file and extract it into `engine_dir`, then clean up.
+fn download_and_extract(dl: &crate::audio::tts::Download, engine_dir: &Path) -> Result<()> {
+    let archive = engine_dir.join(&dl.dest);
+    download_with_progress(&dl.url, &archive, &dl.label)?;
+    extract_tar_bz2(&archive, engine_dir)?;
+    std::fs::remove_file(&archive)?;
+    Ok(())
+}
+
+/// Pure-Rust `.tar.bz2` extraction — no system `tar` dependency (Windows-safe).
+fn extract_tar_bz2(archive: &Path, dest_dir: &Path) -> Result<()> {
+    let f = std::fs::File::open(archive)?;
+    let bz = bzip2::read::BzDecoder::new(f);
+    let mut ar = tar::Archive::new(bz);
+    ar.unpack(dest_dir)?;
+    Ok(())
+}
+
+/// Detect leftover ort-pipeline files (old thewh1teagle Kokoro) at the tts/ root and
+/// offer to purge them before downloading the sherpa version. The PIPELINE_VERSION bump
+/// already invalidates the old audio cache, so we clear it here too.
+fn migrate_old_files() {
+    let tts_dir = paths::tts_dir();
+    // Old layout: model + voices sitting directly under tts/, not in a kokoro/ subdir.
+    let stale: Vec<PathBuf> = ["kokoro-v1.0.int8.onnx", "voices-v1.0.bin"]
+        .iter()
+        .map(|n| tts_dir.join(n))
+        .filter(|p| p.exists())
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    println!(
+        "\n     {}",
+        paint(CORAL, "检测到旧版 Kokoro 文件（ort 管线），将删除并下载 sherpa 版。")
+    );
+    for p in &stale {
+        println!("       {}", paint(MUTED, &p.display().to_string()));
+    }
+    // Old PIPELINE_VERSION keys are dead — purge the audio cache too.
+    if let Ok(entries) = std::fs::read_dir(paths::audio_cache()) {
+        for entry in entries.flatten() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    for p in &stale {
+        let _ = std::fs::remove_file(p);
+    }
+    println!("     {}", paint(GREEN, "✓ 旧文件已清理"));
 }
 
 /// Stream a URL to `dest` with a live, deep-water progress bar — pure Rust (reqwest),
@@ -236,24 +355,26 @@ fn render_bar(label: &str, done: u64, total: u64) {
     std::io::stdout().flush().ok();
 }
 
-fn write_config(needle: &str, key: &str) -> Result<()> {
+fn init_config(needle: &str, key: &str, engine: &str, voice: &str) -> Result<()> {
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let toml = format!(
         "# tuna 配置 · ~/.tuna/config.toml（由首次设置生成，可随时手改）\n\
          # 也可用环境变量 DEEPSEEK_API_KEY 覆盖密钥。\n\n\
          [deepseek]\n\
-         api_key = \"{}\"\n\
+         api_key = \"{key_esc}\"\n\
          base_url = \"https://api.deepseek.com\"\n\
          enrich_model = \"deepseek-v4-flash\"\n\
          chat_model = \"deepseek-v4-pro\"\n\n\
          [gate]\n\
          # 绑定耳机的名字子串（只在连着它时才发声）\n\
-         needle = \"{}\"\n\n\
+         needle = \"{needle_esc}\"\n\n\
          [tts]\n\
-         voice = \"af_heart\"\n\
+         # engine = kokoro | matcha | piper（运行时按 s 打开设置切换）\n\
+         engine = \"{engine}\"\n\
+         voice = \"{voice}\"\n\
          speed = 1.0\n",
-        esc(key),
-        esc(needle),
+        key_esc = esc(key),
+        needle_esc = esc(needle),
     );
     std::fs::write(paths::config_file(), toml)?;
     Ok(())

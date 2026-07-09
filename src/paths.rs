@@ -3,8 +3,13 @@
 
 use std::path::PathBuf;
 
+use crate::audio::tts::TtsEngineKind;
+
 fn home() -> PathBuf {
+    // HOME covers macOS/Linux; USERPROFILE covers Windows. Fallback to "." if neither
+    // is set (extremely unusual — would only happen in a broken sandbox).
     std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }
@@ -29,11 +34,9 @@ pub fn audio_cache() -> PathBuf {
 pub fn tts_dir() -> PathBuf {
     root().join("tts")
 }
-pub fn kokoro_model() -> PathBuf {
-    tts_dir().join("kokoro-v1.0.int8.onnx")
-}
-pub fn kokoro_voices() -> PathBuf {
-    tts_dir().join("voices-v1.0.bin")
+/// Per-engine subdirectory under ~/.tuna/tts/ — each engine's tarball extracts here.
+pub fn engine_dir(kind: TtsEngineKind) -> PathBuf {
+    tts_dir().join(kind.id())
 }
 
 /// Has tuna been set up here yet?

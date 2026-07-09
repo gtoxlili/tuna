@@ -147,6 +147,25 @@ pub struct MorphemeGroup {
     pub members: Vec<GraphMember>,
 }
 
+/// Max members shown per morpheme group in the constellation. Both `graph_members`
+/// (app cursor model) and `render_constellation` (view) reference this single source —
+/// keeping them in sync is what makes the `graph_cursor` index line up with the
+/// rendered order. Drift here = cursor lands on the wrong word.
+pub const GRAPH_MEMBER_CAP: usize = 18;
+
+/// Sort constellation members into the canonical display order:
+/// current word first, then introduced words (by stability desc), then frontier
+/// (by stability desc), ties broken alphabetically. Shared by app (cursor index)
+/// and view (render order) so the two never drift.
+pub fn sort_members(ms: &mut [GraphMember], word: &str) {
+    let rank = |m: &GraphMember| if m.word == word { 0 } else if m.introduced { 1 } else { 2 };
+    ms.sort_by(|a, b| {
+        rank(a).cmp(&rank(b))
+            .then(b.stability.total_cmp(&a.stability))
+            .then(a.word.cmp(&b.word))
+    });
+}
+
 /// Closed set of English derivational/inflectional endings. A word sharing one of
 /// these with another word is grammar, not a derivation bond — kept out of the
 /// constellation. Matched against the de-hyphenated surface so a bare `ion` (from an

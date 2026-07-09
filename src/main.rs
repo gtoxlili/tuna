@@ -20,8 +20,8 @@ use anyhow::Result;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 
-use audio::coreaudio;
 use audio::player::{self, RoutedPlayer};
+use audio::probe;
 use data::Deck;
 
 #[derive(Parser)]
@@ -40,7 +40,7 @@ enum Cmd {
     Ask { word: String },
     /// Deck statistics.
     DeckInfo,
-    /// List CoreAudio devices (UID / transport / output-streams).
+    /// List audio devices (stable_id / transport / output-streams).
     Probe,
     /// Play a test chime routed ONLY to the bound earphone; silent if absent.
     GateTest {
@@ -81,7 +81,7 @@ enum Cmd {
         #[arg(long)]
         word: Option<String>,
     },
-    /// [dev] Synthesize a word to a WAV via the embedded Kokoro engine (no playback).
+    /// [dev] Synthesize a word to a WAV via the sherpa-onnx engine (no playback).
     #[command(hide = true)]
     Synth {
         text: String,
@@ -117,28 +117,27 @@ fn main() -> Result<()> {
     }
 }
 
-/// [dev] Synthesize a word through the embedded Kokoro engine and report clip stats —
-/// proves the pure-Rust ort + misaki-rs pipeline end to end without needing playback.
+/// [dev] Synthesize a word through the sherpa-onnx engine and report clip stats —
+/// proves the TTS pipeline end to end without needing playback.
 fn synth_probe(text: &str, out: &std::path::Path) -> Result<()> {
     let cfg = config::Config::load()?;
     let tts = cfg.tts_engine();
     anyhow::ensure!(
         tts.models_present(),
-        "Kokoro model missing under {} — run setup or set TUNA_HOME.",
+        "TTS 模型未就位 under {} — run setup or set TUNA_HOME.",
         paths::tts_dir().display()
     );
-    let mut server = audio::tts::TtsServer::start(&tts)?;
+    let mut session = audio::tts::start_session(&tts)?;
     let t0 = std::time::Instant::now();
-    server.synth(text, out, &tts.voice, tts.speed)?;
-    let reader = hound::WavReader::open(out)?;
-    let spec = reader.spec();
-    let samples: Vec<f32> = reader
-        .into_samples::<i16>()
-        .filter_map(|s| s.ok())
-        .map(|s| s as f32 / i16::MAX as f32)
-        .collect();
+    let (samples, sample_rate) = session.synth_raw(text, &tts.voice, tts.speed)?;
+    let path = out
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("WAV path is not UTF-8: {}", out.display()))?;
+    if !sherpa_onnx::write(path, &samples, sample_rate) {
+        anyhow::bail!("sherpa write failed for {}", out.display());
+    }
     let n = samples.len();
-    let secs = n as f32 / spec.sample_rate as f32;
+    let secs = n as f32 / sample_rate as f32;
     let rms = (samples.iter().map(|s| s * s).sum::<f32>() / n.max(1) as f32).sqrt();
     let peak = samples.iter().fold(0f32, |m, s| m.max(s.abs()));
     println!(
@@ -146,7 +145,7 @@ fn synth_probe(text: &str, out: &std::path::Path) -> Result<()> {
         out.display(),
         n,
         secs,
-        spec.sample_rate,
+        sample_rate,
         rms,
         peak
     );
@@ -155,7 +154,7 @@ fn synth_probe(text: &str, out: &std::path::Path) -> Result<()> {
 }
 
 /// First run: create ~/.tuna, drop the config, build the DB from the embedded
-/// assets (no ECDICT, no network). TTS is embedded (ort + misaki-rs) — no sidecar.
+/// assets (no ECDICT, no network). TTS runs on sherpa-onnx — statically linked C++ lib.
 fn bootstrap() -> Result<()> {
     paths::ensure_dirs()?;
 
@@ -329,11 +328,11 @@ fn deck_info(deck_path: &std::path::Path) -> Result<()> {
 }
 
 fn probe() -> Result<()> {
-    let devices = coreaudio::enumerate()?;
-    println!("\n  CoreAudio devices ({} total)\n", devices.len());
+    let devices = probe::current_probe().enumerate()?;
+    println!("\n  audio devices ({} total)\n", devices.len());
     println!(
         "  {:<3} {:<28} {:<14} {:>7} {:<7} {}",
-        "", "name", "transport", "out", "default", "uid"
+        "", "name", "transport", "out", "default", "stable_id"
     );
     println!("  {}", "─".repeat(88));
     for d in &devices {
@@ -351,7 +350,7 @@ fn probe() -> Result<()> {
             d.transport_label(),
             d.out_streams,
             if d.is_default_output { "yes" } else { "" },
-            d.uid,
+            d.stable_id,
         );
     }
     println!("\n  ▶ = system default output   · = other output device\n");
@@ -364,7 +363,7 @@ fn probe() -> Result<()> {
     if !bt_outputs.is_empty() {
         println!("  bluetooth output devices (gate candidates):");
         for d in bt_outputs {
-            println!("    • {}  →  bind by uid: {}", d.name, d.uid);
+            println!("    • {}  →  bind by stable_id: {}", d.name, d.stable_id);
         }
         println!();
     }
@@ -372,13 +371,13 @@ fn probe() -> Result<()> {
 }
 
 fn gate_test(needle: &str) -> Result<()> {
-    let devices = coreaudio::enumerate()?;
+    let devices = probe::current_probe().enumerate()?;
     let default_name = player::default_output_name().unwrap_or_else(|| "unknown".to_string());
 
     println!("\n  earphone gate · needle = \"{needle}\"");
     println!("  system default output : {default_name}");
 
-    let Some(bound) = coreaudio::find_bound_output(&devices, needle) else {
+    let Some(bound) = probe::find_bound_output(&devices, needle) else {
         println!("\n  ✗ GATE CLOSED — no output device matches \"{needle}\".");
         println!("    → holding silence (fail-closed). Nothing played through any speaker.\n");
         return Ok(());
@@ -390,7 +389,7 @@ fn gate_test(needle: &str) -> Result<()> {
         bound.transport_label(),
         bound.out_streams
     );
-    println!("  bound uid             : {}", bound.uid);
+    println!("  bound stable_id       : {}", bound.stable_id);
 
     if !bound.is_bluetooth() {
         println!(

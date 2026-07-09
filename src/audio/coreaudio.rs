@@ -1,5 +1,5 @@
 //! Minimal CoreAudio device enumeration — the honest source of truth for the
-//! earphone gate.
+//! earphone gate on macOS.
 //!
 //! We read each device's UID, transport type, and output-stream count directly
 //! from the HAL rather than trusting the display name, because AirPods enumerate
@@ -20,6 +20,8 @@ use coreaudio_sys::{
     AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
     AudioObjectPropertyAddress,
 };
+
+use super::probe::{DeviceInfo, Transport};
 
 /// Build a u32 four-char-code, e.g. `fourcc(b"uid ")`.
 const fn fourcc(b: &[u8; 4]) -> u32 {
@@ -57,42 +59,19 @@ fn addr(selector: u32, scope: u32) -> AudioObjectPropertyAddress {
     }
 }
 
-/// A single audio device as reported by CoreAudio.
-#[derive(Debug, Clone)]
-pub struct CoreAudioDevice {
-    /// Reserved for production: pin a device-bound AudioUnit by AudioDeviceID.
-    #[allow(dead_code)]
-    pub id: AudioObjectID,
-    pub name: String,
-    pub uid: String,
-    pub transport: u32,
-    pub out_streams: usize,
-    pub is_default_output: bool,
-}
-
-impl CoreAudioDevice {
-    /// A device we can play through has at least one output stream.
-    pub fn is_output(&self) -> bool {
-        self.out_streams > 0
-    }
-
-    pub fn is_bluetooth(&self) -> bool {
-        self.transport == TRANSPORT_BLUETOOTH || self.transport == TRANSPORT_BLUETOOTH_LE
-    }
-
-    pub fn transport_label(&self) -> &'static str {
-        match self.transport {
-            TRANSPORT_BLUETOOTH => "bluetooth",
-            TRANSPORT_BLUETOOTH_LE => "bluetooth-le",
-            TRANSPORT_BUILTIN => "built-in",
-            TRANSPORT_USB => "usb",
-            TRANSPORT_AGGREGATE => "aggregate",
-            TRANSPORT_VIRTUAL => "virtual",
-            TRANSPORT_AIRPLAY => "airplay",
-            TRANSPORT_HDMI => "hdmi",
-            TRANSPORT_DISPLAYPORT => "displayport",
-            _ => "other",
-        }
+/// Map a CoreAudio transport fourcc to the platform-agnostic `Transport` enum.
+fn transport_from_fourcc(code: u32) -> Transport {
+    match code {
+        TRANSPORT_BLUETOOTH => Transport::Bluetooth,
+        TRANSPORT_BLUETOOTH_LE => Transport::BluetoothLE,
+        TRANSPORT_BUILTIN => Transport::BuiltIn,
+        TRANSPORT_USB => Transport::Usb,
+        TRANSPORT_AGGREGATE => Transport::Aggregate,
+        TRANSPORT_VIRTUAL => Transport::Virtual,
+        TRANSPORT_AIRPLAY => Transport::AirPlay,
+        TRANSPORT_HDMI => Transport::Hdmi,
+        TRANSPORT_DISPLAYPORT => Transport::DisplayPort,
+        _ => Transport::Other,
     }
 }
 
@@ -178,14 +157,14 @@ unsafe fn read_cfstring(id: AudioObjectID, selector: u32) -> Result<String> {
 }
 
 /// Enumerate every audio device CoreAudio knows about, annotated with the facts
-/// the earphone gate needs.
-pub fn enumerate() -> Result<Vec<CoreAudioDevice>> {
+/// the earphone gate needs. Output is the platform-agnostic `DeviceInfo` so callers
+/// (probe command, setup wizard, poll_gate) share one type across targets.
+pub fn enumerate() -> Result<Vec<DeviceInfo>> {
     unsafe {
         let default_output: AudioObjectID =
             read_scalar(SYSTEM_OBJECT, &addr(PROP_DEFAULT_OUTPUT, SCOPE_GLOBAL)).unwrap_or(0);
 
-        let ids: Vec<AudioObjectID> =
-            read_array(SYSTEM_OBJECT, &addr(PROP_DEVICES, SCOPE_GLOBAL))?;
+        let ids: Vec<AudioObjectID> = read_array(SYSTEM_OBJECT, &addr(PROP_DEVICES, SCOPE_GLOBAL))?;
 
         let mut devices = Vec::with_capacity(ids.len());
         for id in ids {
@@ -194,40 +173,20 @@ pub fn enumerate() -> Result<Vec<CoreAudioDevice>> {
                 continue;
             };
             let uid = read_cfstring(id, PROP_UID).unwrap_or_else(|_| "?".to_string());
-            let transport: u32 =
+            let transport_code: u32 =
                 read_scalar(id, &addr(PROP_TRANSPORT, SCOPE_GLOBAL)).unwrap_or(0);
             let out_streams = read_array::<AudioObjectID>(id, &addr(PROP_STREAMS, SCOPE_OUTPUT))
                 .map(|v| v.len())
                 .unwrap_or(0);
 
-            devices.push(CoreAudioDevice {
-                id,
+            devices.push(DeviceInfo {
+                stable_id: uid,
                 name,
-                uid,
-                transport,
+                transport: transport_from_fourcc(transport_code),
                 out_streams,
                 is_default_output: id == default_output,
             });
         }
         Ok(devices)
     }
-}
-
-/// Find the bound earphone among *output* devices, matched case-insensitively by
-/// name substring. Returns the highest-fidelity match: prefer a Bluetooth output.
-///
-/// Production will bind by persisted UID; for the M0 spike a name needle is enough
-/// because `is_output()` already excludes the same-named HFP input duplicate.
-pub fn find_bound_output<'a>(
-    devices: &'a [CoreAudioDevice],
-    needle: &str,
-) -> Option<&'a CoreAudioDevice> {
-    let needle = needle.to_lowercase();
-    let mut matches: Vec<&CoreAudioDevice> = devices
-        .iter()
-        .filter(|d| d.is_output() && d.name.to_lowercase().contains(&needle))
-        .collect();
-    // Prefer a bluetooth match if several output devices share the needle.
-    matches.sort_by_key(|d| !d.is_bluetooth());
-    matches.into_iter().next()
 }

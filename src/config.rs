@@ -5,7 +5,7 @@
 use anyhow::{bail, Result};
 use serde::Deserialize;
 
-use crate::audio::tts::Tts;
+use crate::audio::tts::{TtsConfig, TtsEngineKind};
 use crate::paths;
 
 #[derive(Debug, Deserialize)]
@@ -14,6 +14,7 @@ pub struct Config {
     pub deepseek: DeepSeekCfg,
     pub gate: GateCfg,
     pub tts: TtsCfg,
+    pub a11y: A11yCfg,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,8 +35,18 @@ pub struct GateCfg {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct TtsCfg {
+    pub engine: String,
     pub voice: String,
     pub speed: f32,
+}
+
+/// Accessibility preferences. `reduced_motion` skips all animation (strike arc,
+/// grade flash, card slide, morpheme stagger) — for vestibular sensitivity or terminals
+/// where animation flicker is unwelcome.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct A11yCfg {
+    pub reduced_motion: bool,
 }
 
 impl Default for Config {
@@ -44,6 +55,7 @@ impl Default for Config {
             deepseek: DeepSeekCfg::default(),
             gate: GateCfg::default(),
             tts: TtsCfg::default(),
+            a11y: A11yCfg::default(),
         }
     }
 }
@@ -67,8 +79,16 @@ impl Default for GateCfg {
 impl Default for TtsCfg {
     fn default() -> Self {
         Self {
+            engine: "kokoro".to_string(),
             voice: "af_heart".to_string(),
             speed: 1.0,
+        }
+    }
+}
+impl Default for A11yCfg {
+    fn default() -> Self {
+        Self {
+            reduced_motion: false,
         }
     }
 }
@@ -88,14 +108,15 @@ impl Config {
         Ok(cfg)
     }
 
-    /// A TTS engine wired to the ~/.tuna locations.
-    pub fn tts_engine(&self) -> Tts {
-        Tts {
-            cache_dir: paths::audio_cache(),
-            model: paths::kokoro_model(),
-            voices: paths::kokoro_voices(),
+    /// The TTS value config wired to the ~/.tuna locations, clonable into worker threads.
+    pub fn tts_engine(&self) -> TtsConfig {
+        let kind = TtsEngineKind::from_id(&self.tts.engine).unwrap_or(TtsEngineKind::Kokoro);
+        TtsConfig {
+            kind,
             voice: self.tts.voice.clone(),
             speed: self.tts.speed,
+            cache_dir: paths::audio_cache(),
+            engine_dir: paths::engine_dir(kind),
         }
     }
 
@@ -108,6 +129,37 @@ impl Config {
         }
         Ok(&self.deepseek.api_key)
     }
+}
+
+/// Update the `[tts]` engine + voice lines in config.toml in place, preserving comments
+/// and all other sections. Used by the runtime settings overlay to switch engines.
+pub fn update_tts(engine: &str, voice: &str) -> Result<()> {
+    let path = paths::config_file();
+    let content = std::fs::read_to_string(&path)?;
+    let mut in_tts = false;
+    let mut found_engine = false;
+    let mut found_voice = false;
+    let mut out = String::with_capacity(content.len());
+    for line in content.lines() {
+        if line.starts_with('[') {
+            in_tts = line.trim() == "[tts]";
+        }
+        if in_tts && line.starts_with("engine") {
+            out.push_str(&format!("engine = \"{engine}\"\n"));
+            found_engine = true;
+        } else if in_tts && line.starts_with("voice") {
+            out.push_str(&format!("voice = \"{voice}\"\n"));
+            found_voice = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !found_engine || !found_voice {
+        bail!("config.toml [tts] section missing engine/voice lines");
+    }
+    std::fs::write(&path, out)?;
+    Ok(())
 }
 
 /// The config.toml written on first run.
@@ -126,6 +178,12 @@ chat_model = "deepseek-v4-pro"
 needle = "airpods"
 
 [tts]
+# engine = kokoro | matcha | piper（运行时按 s 打开设置切换）
+engine = "kokoro"
 voice = "af_heart"
 speed = 1.0
+
+[a11y]
+# reduced_motion = true 时跳过所有动画(星火接线弧光/评分反馈/卡片切换/morpheme 错峰)
+reduced_motion = false
 "#;

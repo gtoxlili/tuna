@@ -1,6 +1,8 @@
 //! The study TUI: terminal lifecycle + the synchronous render/event loop.
 
 pub mod app;
+pub mod cmdmenu;
+pub mod settings;
 pub mod theme;
 pub mod view;
 
@@ -8,7 +10,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
 use app::App;
 
@@ -71,12 +73,13 @@ pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
         term.draw(|f| view::render(f, &app))?;
         println!("\n── STRIKE FLIPPED (recall check) ──\n{}", term.backend());
 
-        // arc firing mid-animation (simulate a recall success ~half done)
+        // arc firing mid-animation (simulate a recall success ~half done). Window is
+        // now 400ms (was 900), so 200ms lands at the midpoint of the arc.
         if let Some(c) = app.current.as_mut() {
             c.strike = app::Strike::Idle;
         }
         app.strike_anim =
-            Some(std::time::Instant::now() - std::time::Duration::from_millis(450));
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(200));
         term.draw(|f| view::render(f, &app))?;
         println!("\n── STRIKE ARC (mid-fire) ──\n{}", term.backend());
     }
@@ -95,26 +98,18 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
     loop {
         terminal.draw(|f| view::render(f, app))?;
 
-        // Redraw fast while something is animating (spinner), else idle-poll so the
-        // earphone gate stays live without burning CPU.
+        // Redraw fast while something is animating (slide-in / stagger / spinner), else
+        // idle-poll so the earphone gate stays live without burning CPU. 50ms ≈ 20fps,
+        // smooth enough for the 150ms slide-in and 60ms stagger steps.
         let timeout = if app.is_animating() {
-            Duration::from_millis(80)
+            Duration::from_millis(50)
         } else {
             Duration::from_millis(200)
         };
         if event::poll(timeout)? {
             if let Event::Key(k) = event::read()? {
                 if k.kind == KeyEventKind::Press {
-                    let ch = match k.code {
-                        KeyCode::Char(c) => Some(c),
-                        KeyCode::Enter => Some('\n'),
-                        KeyCode::Esc => Some('\x1b'),
-                        KeyCode::Backspace => Some('\x08'),
-                        _ => None,
-                    };
-                    if let Some(c) = ch {
-                        app.on_key(c)?;
-                    }
+                    app.on_key(k)?;
                 }
             }
         }
