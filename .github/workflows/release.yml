@@ -1,0 +1,164 @@
+name: release
+
+# Build release binaries for macOS (arm64 + x86_64), Linux (x86_64), Windows (x86_64),
+# attach them to a GitHub Release on tag push, and sign each artifact with a build
+# provenance attestation. Manual dispatch builds + uploads workflow artifacts without
+# cutting a release.
+#
+# sherpa-onnx statically links a C++ lib whose build.rs fetches a prebuilt archive per
+# target triple (os+arch, not full triple). All four matrix targets have prebuilts;
+# musl / windows-gnu / windows-aarch64 / 32-bit do NOT and are deliberately absent.
+# Each target builds natively on its own runner — cross-compiling would need a target
+# C++ linker + libstdc++, which defeats the "fetch prebuilt" simplicity.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            archive: tar.gz
+            # .cargo/config.toml sets target-cpu=native for this target — correct for a
+            # personal install but NOT portable across Apple Silicon revisions in a
+            # distributable build. Override to apple-m1 (baseline of the whole M-series)
+            # so the binary runs on M1..M4 alike.
+            rustflags: '-C target-cpu=apple-m1'
+          - target: x86_64-apple-darwin
+            # macos-13 (Intel) was retired 2025-10; macos-15-intel is the current
+            # Intel runner, available until ~2027-08. Native build, no cross-compile.
+            runner: macos-15-intel
+            archive: tar.gz
+            rustflags: ''
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            archive: tar.gz
+            # config.toml uses mold + x86-64-v3; mold isn't on the stock ubuntu runner.
+            # Drop the linker flag, keep the portable x86-64-v3 baseline (AVX2-era).
+            # The binary dynamically links libstdc++.so (sherpa's C++ runtime) —
+            # ubuntu 22.04's glibc 2.35 is a safe floor for most modern distros.
+            rustflags: '-C target-cpu=x86-64-v3'
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2022
+            archive: zip
+            rustflags: ''
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # rust-cache keys on rustc version + target + Cargo.lock automatically and prunes
+      # stale files. sherpa-onnx's prebuilt archive lives under target/<target>/ (the
+      # build script's OUT_DIR), so it is covered by the default target/ cache.
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: build release
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --release --target ${{ matrix.target }} --locked
+
+      # Package the binary at the archive root (flat, no nesting) — Homebrew's
+      # `bin.install "tuna"` looks for the binary relative to the extracted archive
+      # root, so a nested staging dir would break the Formula.
+      - name: package (unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          ver="${{ github.ref_name }}"
+          [ -z "$ver" ] && ver="dev"
+          staging="tuna-$ver-${{ matrix.target }}"
+          mkdir "$staging"
+          cd "$staging"
+          cp "../target/${{ matrix.target }}/release/tuna" .
+          cp ../README.md . 2>/dev/null || true
+          cp ../LICENSE . 2>/dev/null || true
+          cd ..
+          tar czf "$staging.tar.gz" "$staging"
+          shasum -a 256 "$staging.tar.gz" | tee checksums-${{ matrix.target }}.txt
+
+      - name: package (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}"
+          if (-not $ver) { $ver = "dev" }
+          $staging = "tuna-$ver-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/tuna.exe" "$staging/"
+          Copy-Item README.md "$staging/" -ErrorAction SilentlyContinue
+          Copy-Item LICENSE "$staging/" -ErrorAction SilentlyContinue
+          Compress-Archive -Path $staging -DestinationPath "$staging.zip"
+          (Get-FileHash "$staging.zip" -Algorithm SHA256).Hash | Tee-Object "checksums-${{ matrix.target }}.txt"
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tuna-${{ matrix.target }}
+          path: |
+            tuna-*.${{ matrix.archive }}
+            checksums-${{ matrix.target }}.txt
+
+      # Sign each artifact with a build-provenance attestation (Sigstore/Fulcio/Rekor,
+      # free, no cosign needed). Lets users verify the binary came from this workflow
+      # via `gh attestation verify`. Only on real pushes (attest needs a ref).
+      - name: attest build provenance
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            tuna-*.${{ matrix.archive }}
+
+  release:
+    # Only on a real tag: gather all per-target artifacts and attach them to a GitHub
+    # Release. On manual dispatch this job is skipped.
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release create "$tag" \
+            --title "$tag" \
+            --generate-notes \
+            artifacts/tuna-*.tar.gz \
+            artifacts/tuna-*.zip \
+            artifacts/checksums-*.txt
