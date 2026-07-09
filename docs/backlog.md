@@ -12,8 +12,8 @@
 - **M1** 数据管线(ECDICT → 考研牌组 → FSRS/SQLite)✓
 - **M2** 复习循环 + Ratatui 界面(拆·联·验 + 耳机门指示 + FSRS 间隔预览)✓
 - **M3** DeepSeek 词条精加工(词素/推导链/诚实词源/例句)+ 词根图边 + 拆·联 界面 ✓
-- **M4** Kokoro TTS + 耳机门播放(`Space` 发音)✓ —— 后升级为纯 Rust 单二进制(ort + misaki-rs,
-  砍掉 Python/uv/espeak)。
+- **M4** Kokoro TTS + 耳机门播放(`Space` 发音)✓ —— 后升级为 sherpa-onnx 多引擎单二进制
+  (Kokoro/Matcha/Piper 统一 OfflineTts API,砍掉 Python/uv/espeak)。
 - **M5** 打磨:词根图谱浮现(「你学过 X,同根」)+ 苏格拉底辨析(`a`)✓
 
 ### 打磨阶段(P0–P7)
@@ -28,7 +28,14 @@
 - **首启向导** 三步(绑耳机/密钥/下模型,deep-water styled)✓
 - **P5** 星座 root-family(`g`):同根已学词 + 只差一个词根的前沿暗星 ✓
 - **P6** 同源合并:Wiktionary 碎片折回最简词根(spect 家族 2→6 词),gloss-gated ✓
-- **P7** 纯 Rust 单二进制:ort + misaki-rs 全链路进二进制,砍 Python/uv/espeak ✓
+- **P7** 纯 Rust 单二进制:sherpa-onnx 静态链接 C++ 库,多引擎统一 OfflineTts API,砍 Python/uv/espeak ✓
+- **跨平台移植**:TTS 换 sherpa-onnx 解除 ort 的 Windows MSVC-only 阻塞;CoreAudio 依赖收进
+  `cfg(target_os="macos")` 门;`trait AudioProbe` 抽象 macOS CoreAudio / Linux ALSA / Windows WASAPI
+  三后端。门语义在非 macOS 平台降级为按名字绑定(fail-closed 原则三平台一致)✓
+- **多引擎 TTS 切换**:首启向导第③步选引擎(Kokoro/Matcha/Piper),运行时按 `s` 热切换 overlay,
+  写 config + drop warm session 重载 ✓
+- **方向键选读交互**:揭示后 `↑↓` 在单词/例句间切换朗读目标,`Space` 朗读选中项;星座 overlay 内
+  `↑↓` 导航 `Space` 朗读选中词 ✓
 - **生产 release profile**:LTO fat / codegen-units=1 / strip=symbols / panic=unwind + 平台 target flags ✓
 - **审计与死代码清理**:`enrich.py`(脚枪)/ `synth.py` / `known_anchors` prompt 规则 / morpheme 死列
   (variants/gloss_en/src_lang/etymon/citation/specificity)全部删除 ✓
@@ -57,23 +64,12 @@
 
 ## 待决问题(需用户明示)
 
-### Windows 移植
+### sherpa 引擎音色 / 自然度
 
-被阻塞两层(见 [decisions.md](./decisions.md) 末节):(1) ort 的 Windows 预编译库只有
-`x86_64-pc-windows-msvc`,`cargo-zigbuild` 只能产 `windows-gnu` → zig 路死;(2) tuna 是 macOS 专属
-架构(`coreaudio-sys` + `core-foundation` 无条件依赖)。
-
-Windows 版"不是换个 linker 交叉编译,是一次移植"。需用户决定:
-- 是否做完整移植(三步:① 把 CoreAudio 依赖收进 `cfg(target_os="macos")`;② 写 Windows 耳机门
-  后端(cpal/WASAPI),Windows 无 CoreAudio 稳定 UID,改用 endpoint ID/名字,门语义要重定;
-  ③ 用 `cargo-xwin` cross 到 `x86_64-pc-windows-msvc`);
-- 还是放弃 Windows;
-- 还是接受门语义降级(默认设备播放 = 漏音 = 背叛办公室静默初衷,**不可偷偷这么做**)。
-
-### misaki-rs 音色 / 自然度
-
-`misaki-rs` 音素保真度未 A/B 验证。落在"发音"这个情感中心上,无耳朵替用户判断音质,需用户
-真机实听拍板。可测的管线都健康(`tuna synth` 烟测通过)。
+三引擎音色特征各异,未 A/B 验证:Kokoro(风格向量 TTS,英文女声 af_heart)、Matcha(条件流匹配,
+LJSpeech 女声)、Piper(VITS 社区多音色,默认 Lessac 女声)。落在"发音"这个情感中心上,无耳朵替用户
+判断音质,需用户真机实听拍板选哪个引擎。可测的管线都健康(`tuna synth` 烟测通过,运行时按 `s`
+可热切换引擎重听对比)。
 
 ## Backlog(未排期)
 

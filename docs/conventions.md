@@ -76,10 +76,16 @@
   ratatui 0.30 兼容;前者钉旧版会版本冲突。`tui-big-text`(钉 0.29)、`tachyonfx`(钉 0.29)都因此弃用,
   改用自制动画。
 - `tui-markdown` 用 `--no-default-features` 砍掉 syntect 重依赖,且它依赖 `ratatui-core` 与项目同 core。
-- `ort = "=2.0.0-rc.10"` 精确 pin(RC 版本);用 ort 的 **tuple form `(shape, &[T])`** 而非 ndarray 视图,
-  让 tuna 与 ort 内部的 ndarray 版本无耦合(ort rc.10 依赖 ndarray 0.16,直接用 view 会类型不匹配)。
+- `sherpa-onnx` 静态链接 k2-fsa 维护的 C++ 库,build script 从 GitHub releases 拉预编译包(按 target
+  三元组)。本地 TLS 故障可用 `SHERPA_ONNX_ARCHIVE_DIR` 指向缓存目录绕过下载(缓存里放对应 target
+  的 `*.tar.bz2`)。一个 `OfflineTts` API 覆盖 Kokoro/Matcha/Piper,引擎切换只换 model config 路径。
+- `tar` + `bzip2` 纯 Rust 解压 `.tar.bz2`(setup 向导下 sherpa 模型 tarball 用),Windows 无需系统 `tar`。
+- `coreaudio-sys` + `core-foundation` 收进 `[target.'cfg(target_os = "macos")'.dependencies]`,
+  Linux/Windows 构建不拉这俩——CoreAudio 只在 macOS 存在。`src/audio/coreaudio.rs` 同样 cfg 门。
 - `cpal` 通过 `rodio::cpal` 重导出使用,不直接依赖——rodio 0.22 vendor 了 cpal 0.17.3,
-  直接依赖 cpal 0.18 会导致 `Device` 类型不匹配(E0308)。
+  直接依赖 cpal 0.18 会导致 `Device` 类型不匹配(E0308)。cpal 0.17 后端:macOS CoreAudio / Linux ALSA /
+  Windows WASAPI;但 0.17 在 Linux/Windows 不暴露 transport fourcc 与稳定 UID,所以非 macOS 平台
+  门绑定降级为按显示名(见 [architecture.md](./architecture.md) 不变式条)。
 - `reqwest` 用 `default-tls`(macOS Secure Transport),`rustls-tls` 不是有效 feature 名会让 `cargo add` 静默失败。
 
 ### 代码约定
@@ -88,6 +94,26 @@
 - `morphemes.jsonl` **不被运行时加载**(只 `enrichment.jsonl` 进库;morpheme id 来自 `normalize_morpheme`)。
 - 保留连字符作为位置编码:`-al`(suffix)与 `al-`(prefix)是不同节点,normalize 不剥连字符。
 - 视觉:deep-water instrument 调色板——深海墨底、phosphor-teal(`#34D3C2`)为"推导电流"主色、amber 为"你已拥有的部件"。
+
+### 交互不变式(v3)
+
+- **方向键 = 当前焦点的移动**:↑↓ 纵向(speak_cursor / 菜单选项 / 星座扁平 / 辨析滚动 / 引擎选择),
+  ←→ 横向(星座组内)或静默 no-op(无列表状态)。4 键不做同件事。
+- **Esc = 退一层**:关顶层 overlay / 跳过星火接线 / base 两按退出(2s 窗口)/ done 单按退出。
+  **不**做 overlay 间 Tab 轮转——Esc 只退不进。
+- **Tab = 进一层**:打开命令菜单(唯一"进"的键)。菜单内 ↑↓ 选、Enter 确认、字母直达、Esc/Tab 关。
+- **每个键有反馈**:silent swallow 是 bug。overlay 内按不可用键 → toast "先关闭 X";不可用操作 → toast 说明;
+  失败路径 → toast 诊断 + 下一步。
+- **文本永远诚实**:help / keybar / done 屏文案与**当前代码行为**一致,不抢跑未实现功能。改行为时同步改文案。
+- **状态不渗漏**:`load_current` 切卡时重置**所有 per-card 瞬态**(strike_anim / ask / ask_scroll /
+  show_graph / graph_cursor / tts_pending / tts_rx / reveal_anim / card_slide)。**例外**:grade_flash
+  是跨卡瞬态(grade → 下一卡的 wash 反馈),不在 load_current 清——它自过期(poll_async)+ undo_grade 显式清。
+- **动画预算 ≤4 类,全 ≤400ms,全受 `reduced_motion` 门控**(含 spinner):卡片淡入 150ms / morpheme 错峰
+  60ms×index(每 cell 120ms fade)/ grade flash 250ms / strike arc 400ms。reduced_motion 用户与普通用户
+  读**相同内容**(动画只影响过渡感,不掩盖信息)。
+- **toast 文案规范**:Info 简短事实 ≤20 字("↶ 已撤销");Warn 状态变化 + 上下文 ≤30 字("耳机断开 · 已静音");
+  Error 诊断 + 下一步 ≤40 字("合成失败 · 按 s 切引擎")。Error toast 是 sticky(TTL=None),不被 no-op 键清,
+  只在实际执行动作的键或 Esc 清。
 
 ### 时间与 ETA
 

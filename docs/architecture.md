@@ -14,9 +14,15 @@ src/
 ├── assets.rs          include_str!/include_bytes! 把 deck/enrichment 资产编进二进制
 ├── setup.rs           首启三步向导(绑耳机/密钥/下模型)+ 阻塞式带进度条下载
 ├── audio/
-│   ├── coreaudio.rs   CoreAudio HAL 枚举(UID/transport/out-streams);macOS 专属
+│   ├── probe.rs       trait AudioProbe 跨平台抽象;macOS 走 CoreAudio,Linux/Windows 走 cpal
+│   ├── coreaudio.rs   CoreAudio HAL 枚举(UID/transport/out-streams);cfg(target_os="macos") 门
 │   ├── player.rs      RoutedPlayer:把流开在指定 cpal 设备上;drop = 即时静音
-│   ├── tts.rs         Kokoro 纯 Rust 引擎(ort + misaki-rs);TtsServer 长驻合成
+│   ├── tts/           sherpa-onnx 多引擎 TTS(Kokoro/Matcha/Piper 统一 OfflineTts API)
+│   │   ├── mod.rs     TtsEngineKind / TtsEngine trait(静态描述符)/ TtsConfig / SynthSession trait
+│   │   ├── session.rs SherpaSession:暖推理 OfflineTts 实例,gen 保留字避开用 gen_cfg
+│   │   ├── kokoro.rs  Kokoro 引擎描述符(风格向量 TTS,sid 选音色)
+│   │   ├── matcha.rs  Matcha 引擎描述符(条件流匹配 + HiFiGAN vocoder)
+│   │   └── piper.rs   Piper 引擎描述符(VITS 社区多音色)
 │   └── mod.rs
 ├── data/
 │   ├── schema.rs      SQLite schema(8 张表)+ PRAGMA;单一 SCHEMA 常量
@@ -91,9 +97,11 @@ src/
 |---|---|
 | `Enter` | 揭示(Phase A → B) |
 | `Space` | 发音(只走绑定耳机;未缓存则当场合成,首次含图优化 ~0.6s release) |
+| `↑↓` | 选读(揭示后切换朗读目标:单词本身 / 例句;wraparound) |
 | `a` | 苏格拉底辨析 / guess-eval(需 DeepSeek 密钥) |
 | `w` | 打开该词 Wiktionary 词源页("honesty as a keypress") |
-| `g` | 星座:当前词的词根家族(同根已学词 + 只差一个词根的前沿暗星) |
+| `g` | 星座:当前词的词根家族(同根已学词 + 只差一个词根的前沿暗星);overlay 内 `↑↓` 导航 `Space` 朗读 |
+| `s` | 设置:运行时切换 TTS 引擎 overlay(Kokoro/Matcha/Piper) |
 
 ## CLI 命令面
 
@@ -110,7 +118,7 @@ src/
 | `tuna export-deck` | 隐藏 | 维护者:导出 `assets/deck.jsonl` |
 | `tuna enrich` | 隐藏 | 维护者:DeepSeek 精加工进开发库 |
 | `tuna render-preview` | 隐藏 | dev:TestBackend 渲染验证(无 TTY) |
-| `tuna synth` | 隐藏 | dev:合成 WAV 不播放,验证 ort+misaki 管线 |
+| `tuna synth` | 隐藏 | dev:合成 WAV 不播放,验证 sherpa-onnx 管线 |
 
 `Probe` 和 `GateTest` **不**调 `ensure_ready()`,无需 `~/.tuna` 已初始化即可跑。
 
@@ -120,14 +128,17 @@ src/
 
 - **耳机门是物理保证,不是 if 拦截**:`RoutedPlayer` 把流直接开在绑定的 cpal 设备上,手里没有指向
   系统默认输出的流,所以漏音在物理上不可能。耳机不在场 → `find_output_device` 返回 `None` →
-  fail-closed 静音,绝不回退扬声器。绑定按设备 UID(跨重连稳定、内嵌 MAC),不按显示名
-  (AirPods 同名输入/输出设备会掷硬币)。
+  fail-closed 静音,绝不回退扬声器。绑定契约跨平台有差异:macOS 按设备 UID(跨重连稳定、内嵌 MAC,
+  解决 AirPods 同名输入/输出掷硬币问题);Linux/Windows 因 cpal 0.17 不暴露稳定 UID/transport,
+  回退按显示名绑定——setup 向导显式告警 ALSA/WASAPI 名字可能随重启漂移,需重跑 setup 重绑。
 - **单二进制自包含**:`assets.rs` 把 4801 词词典(2.2M,`DECK`)+ 精加工(`ENRICHMENT`)`include_str!`
   进二进制;morpheme 脊柱在运行时从 enrichment 派生(`normalize_morpheme`),`assets/morphemes.jsonl`
-  虽提交进仓库但不被加载(只作人类可审 spine)。TTS 模型(~118MB)首启向导同步下载 + 进度条。
-  用户路径无需 ECDICT、无需 Python、无需系统 espeak。
-- **macOS 专属(当前)**:`coreaudio-sys` + `core-foundation` 是**无条件依赖**(Cargo.toml 无 `cfg` 门),
-  `src/audio/coreaudio.rs` 直接调 CoreAudio HAL。Windows 移植是待决问题,见 [backlog.md](./backlog.md)。
+  虽提交进仓库但不被加载(只作人类可审 spine)。TTS 模型(63–320MB,随引擎)首启向导同步下载 +
+  进度条。用户路径无需 ECDICT、无需 Python、无需系统 espeak(sherpa 预编译包内嵌 espeak-ng-data)。
+- **跨平台三后端**:macOS 走 CoreAudio HAL(`coreaudio-sys` + `core-foundation`,收进
+  `cfg(target_os="macos")` 门),Linux 走 cpal ALSA,Windows 走 cpal WASAPI。`trait AudioProbe`
+  抽象枚举,`current_probe()` 按目标挑后端;无匹配目标则 `compile_error!`。门语义在非 macOS 平台
+  降级为按名字绑定(见上条),但 fail-closed 原则三平台一致。
 - **panic = "unwind"**:TUI 靠 unwinding 在 panic 时恢复终端(Drop guard 还原终端模式);`abort` 会
   跳过 Drop 把终端弄烂。这是 release profile 里显式保留 unwind 的理由。
 
@@ -146,6 +157,7 @@ chat_model = "deepseek-v4-pro"                  # 辨析/guess-eval
 needle = "airpods"                              # 绑定耳机的名字子串
 
 [tts]
+engine = "kokoro"                                # kokoro | matcha | piper（运行时按 s 切换）
 voice = "af_heart"
 speed = 1.0
 ```

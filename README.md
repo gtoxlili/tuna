@@ -1,80 +1,92 @@
 # tuna
 
-一个终端里的**词根推导终端** —— 为考研英语（英语一）设计，让你在办公室静默地、通过绑定的蓝牙耳机、以推导而非死记硬背的方式学词汇。
+一个终端里的词根推导学习工具，为考研英语（英语一）设计。在办公室里通过绑定的蓝牙耳机、用推导而不是死记的方式学词汇。
 
-> 词汇不是要*存储*的事实，是要*推导*的公式。
+> 词汇不是要存储的事实，是要推导的公式。
 
-方法叫 **拆·联·验**（Decompose · Link · Retrieve）：先把词拆成词素、把新词接到你已掌握的词根图上，再用 FSRS 间隔重复做生成式提取。发音只走绑定的耳机（连不上就静默），全程无需出声。
+## 它做什么
 
-设计评审：<https://claude.ai/code/artifact/a249c729-f9b6-46e6-a0fd-2c85e42ba073>
+方法叫拆·联·验（Decompose · Link · Retrieve）：把词拆成词素，把新词接到你已掌握的词根图上，再用 FSRS 间隔重复做生成式提取。发音只走绑定的耳机，连不上就静默，全程不用出声。
 
-## 技术栈
+## 特点
 
-Rust · [Ratatui](https://ratatui.rs)（TUI）· [cpal](https://github.com/RustAudio/cpal)/[rodio](https://github.com/RustAudio/rodio)（耳机门，零 CGO 绑定指定设备）· [rusqlite](https://github.com/rusqlite/rusqlite) · [rs-fsrs](https://github.com/open-spaced-repetition/rs-fsrs) · [ECDICT](https://github.com/skywind3000/ECDICT)（离线词典，已内嵌）· DeepSeek（辨析）· Kokoro（本地 TTS，懒加载）。
+- **词根推导而非死记**。每个词都拆成词素（前缀、词根、后缀），你先自己推一次再看答案。记住的是词怎么来的，不是孤立的拼写。
+- **耳机门**。音频流直接开在你绑定的蓝牙耳机上，程序手里没有指向笔记本扬声器的流。耳机不在场就静音，不会回退到扬声器。办公室里不会漏音。
+- **词源诚实**。词素来自 Wiktionary 的确定性解析，每根可回溯到引用版本。LLM 只负责翻译和叙述已经核验过的词素，结构上加不进也改不了任何词根。按 `w` 打开该词的 Wiktionary 词源页。
+- **星火接线**。新词揭示后，系统问你"词根 act 你在哪个已学的词里见过"。你在脑子里回忆，翻牌，自己打分。回忆成功就给那个旧词记一次真实的 FSRS 复习。词和词之间的边是你自己回忆出来的，不是机器替你画的。
+- **星座**。按 `g` 看当前词的词根家族。你亲手学过的同根词会发光（绿色表示记忆已稳固，琥珀色表示还新鲜），暗星是只差一个词根就能推导出来的前沿。只画真实共享词素的边，语法后缀不算。
+- **苏格拉底辨析**。按 `a` 把你猜的推导发给 DeepSeek，它点评你的推理过程，提引导性问题让你自己纠正，不直接给判决。需要 DeepSeek 密钥，学习本身离线可用。
+- **本地发音**。sherpa-onnx 静态链接 C++ 库，Kokoro、Matcha、Piper 三个引擎可切换，整条文本到波形的链路都在二进制里。不用 Python，不用系统 espeak。首次合成约 0.6 秒，之后落 WAV 缓存即取即播。
+- **单二进制自包含**。4801 词的词典和精加工数据都编进了二进制，不用下载任何数据文件。`cargo install` 装完就能跑。
+
+## 安装
+
+### macOS（Homebrew）
+
+```bash
+brew tap gtoxlili/tuna
+brew trust gtoxlili/tuna
+brew install tuna
+```
+
+Homebrew 6.0 起第三方 tap 需要显式信任（`brew trust`）才会加载。如果你的 Homebrew 版本低于 6.0，`brew tap` 后直接 `brew install tuna` 即可。
+
+二进制覆盖 Apple Silicon（M1 及以上）和 Intel Mac。
+
+### cargo
+
+```bash
+cargo install --path .
+```
+
+需要本地有 Rust 工具链。从源码编译，sherpa-onnx 的预编译库会自动下载。
+
+### 直接下载
+
+到 [Releases 页面](https://github.com/gtoxlili/tuna/releases) 下载对应平台的压缩包，解压后把 `tuna` 放到 PATH 里。提供 macOS arm64、macOS x86_64、Linux x86_64、Windows x86_64 四个预编译版本。
 
 ## 快速开始
 
-词典与精加工都**编进了二进制**——无需下载 ECDICT、无需任何数据文件。
-
 ```bash
-cargo install --path .     # 或 cargo run --
-tuna                       # 首次运行:三步设置向导,然后开始学习
+tuna                       # 首次运行进入三步向导，之后开始学习
 ```
 
-首次运行是一个**三步向导**:① 从你连着的蓝牙设备里选一副耳机绑定(只有它连着时才发声)· ② 粘贴 DeepSeek 密钥(可选,学习本身离线可用)· ③ 现在或稍后下载 Kokoro 发音模型。之后在 `~/.tuna/` 建好一切:
+首次运行是三步向导：从你连着的蓝牙设备里选一副耳机绑定，粘贴 DeepSeek 密钥（可选，学习本身离线可用），下载发音模型。之后在 `~/.tuna/` 建好一切：
 
 | 路径 | 内容 |
 |---|---|
-| `~/.tuna/config.toml` | 配置(DeepSeek 密钥、绑定耳机、音色) |
-| `~/.tuna/tuna.db` | 牌组(4801 词)+ 你的复习状态 |
+| `~/.tuna/config.toml` | 配置（密钥、绑定耳机、TTS 引擎、音色） |
+| `~/.tuna/tuna.db` | 牌组（4801 词）和你的复习状态 |
 | `~/.tuna/cache/audio/` | 发音缓存 |
-| `~/.tuna/tts/` | Kokoro 模型 |
+| `~/.tuna/tts/` | 发音模型 |
 
-学习本身**离线可用、无需密钥**。想启用苏格拉底辨析,在 `~/.tuna/config.toml` 里填 DeepSeek 密钥(或设 `$DEEPSEEK_API_KEY`)。用 `$TUNA_HOME` 可改根目录。
+用 `$TUNA_HOME` 可以改根目录。苏格拉底辨析需要 DeepSeek 密钥，在 `~/.tuna/config.toml` 里填，或设 `$DEEPSEEK_API_KEY`。
 
 ## 命令
 
 | 命令 | 作用 |
 |---|---|
-| `tuna`（或 `tuna study`） | 开始学习(`Enter` 揭示 · `Space` 发音 · `a` 辨析 · `w` 词源 · `g` 星座) |
-| `tuna ask <word>` | 苏格拉底式辨析该词与易混/近义词 |
-| `tuna deck-info` | 牌组统计 + 频率序队列 |
-| `tuna probe` | 列出 CoreAudio 设备(UID/传输/输出流)——耳机门的事实来源 |
-| `tuna gate-test [needle]` | 播测试音,**只**走绑定耳机;不在场则静默 |
+| `tuna`（或 `tuna study`） | 开始学习 |
+| `tuna ask <word>` | 苏格拉底式辨析该词与易混词 |
+| `tuna deck-info` | 牌组统计和频率序队列 |
+| `tuna probe` | 列出音频设备（UID、传输、输出流） |
+| `tuna gate-test [needle]` | 播测试音，只走绑定耳机，不在场则静默 |
 
-## 发音（Kokoro TTS · 纯 Rust 单二进制）
+学习时的按键：`Tab` 打开命令菜单，`Enter` 揭示答案，`Space` 发音，`a` 辨析，`w` 词源，`g` 星座，`s` 设置，`?` 帮助，`u` 撤销上一次评分，`Esc` 退出。
 
-**无需 Python、无需 uv、无需系统 espeak。** 发音完全内嵌:[`ort`](https://ort.pyke.io)（ONNX Runtime,静态链接）跑 Kokoro-82M 模型,[`misaki-rs`](https://crates.io/crates/misaki-rs)（纯 Rust G2P）做音素化 —— 整条 `文本 → 音素 → token → ONNX → 24kHz 波形` 链路都在二进制里,不调任何外部进程。
+## 维护者
 
-模型权重(约 90MB + 28MB,int8)是**数据不是依赖**:首次运行的三步向导会**同步下载 + 进度条**,下齐才进入学习。按 `Space` 时,未缓存的词**当场合成**(首次含图优化 ~1.5s、之后落 WAV 缓存即取即播),且只走绑定耳机。
-
-## 维护者（重建内嵌资产）
+重建内嵌资产（普通用户不用关心）：
 
 ```bash
 tuna build-deck            # ECDICT(data/stardict.db) → data/tuna.db
-tuna export-deck           # data/tuna.db → assets/deck.jsonl(提交进仓库)
+tuna export-deck           # data/tuna.db → assets/deck.jsonl（提交进仓库）
 uv run scripts/bake.py     # Wiktionary 词源接地 → data/etym_cache.jsonl
-uv run scripts/narrate.py  # 词根聚类 + 受控 LLM → assets/{morphemes,enrichment}.jsonl(提交)
+uv run scripts/narrate.py  # 词根聚类 + 受控 LLM → assets/{morphemes,enrichment}.jsonl（提交）
 ```
 
-> 精加工是**离线烤制**、结果提交进仓库,用户零 LLM 成本。`bake.py` 抓 Wiktionary 模板做确定性词源解析,`narrate.py` 只让 LLM 翻译/串词已验证的词素(禁止编造词根)。
-
-## 耳机门
-
-办公室静默是这个产品的情感中心。tuna 把播放流**直接开在绑定的蓝牙耳机上**——手里从来没有一条指向笔记本扬声器的流，所以漏音在物理上不可能，而不是靠一个 `if` 拦着。耳机不在场 ⇒ 零音频，绝不回退到扬声器。绑定按设备 UID（跨重连稳定、内嵌 MAC），因为 AirPods 会以同名的输入/输出两个设备出现，只有 UID + 输出流数能区分。
-
-## 状态
-
-- **M0** 耳机门 + CoreAudio 枚举 ✓
-- **M1** 数据管线（ECDICT → 考研牌组 → FSRS/SQLite）✓
-- **M2** 复习循环 + Ratatui 界面（拆·联·验 + 耳机门指示 + FSRS 间隔预览）✓
-- **M3** DeepSeek 词条精加工（词素/推导链/诚实词源/例句）+ 词根图边 + 拆·联 界面 ✓
-- **M4** Kokoro TTS + 耳机门播放（`Space` 发音）✓ · 后升级为**纯 Rust 单二进制**(ort + misaki-rs,砍掉 Python/uv/espeak)
-- **M5** 打磨：词根图谱浮现（「你学过 X，同根」）+ 苏格拉底辨析（`a`）✓
-- **星座**（`g`）：当前词的词根家族——你亲手点亮的同根词（绿=记忆已稳固、琥珀=尚新鲜）与「只差一个词根」的前沿暗星。只画真实存在的共享词素边，从不臆造；语法后缀（-ion/-ly…）不算推导之桥，已滤除。✓
-- **同源合并**：Wiktionary 对每个词给出的是它*直接*的词源（inspect→spect、spectacle→spectāculum、spectator→spectate），同一词根 `spect` 因此裂成好几个节点、本该同根的词互不相连。建库时做一次确定性归并，把碎片折回最简词根——但只在「一个折叠形是另一个的前缀」且「中文释义共享义符」时才合并（所以 `port`拿/运 不会吞掉 `portion`部分，`spec`种类 不会并入 `spect`看）。词素本身保持 Wiktionary 原样，归并是可测试的透明变换。`spect` 家族由此从 2 词并到 6 词；语法后缀降级为非锚点，永不冒充"你学过的同根词"。✓
-  - backlog：`-sid-` 这类中缀词根的合并（需真正的形态分析，暂缓）、真题语料、个人 FSRS 权重离线拟合、学习仪表盘
+精加工是离线烤制、结果提交进仓库，用户零 LLM 成本。`bake.py` 抓 Wiktionary 模板做确定性词源解析，`narrate.py` 只让 LLM 翻译和串词已经验证的词素，禁止编造词根。
 
 ## 许可
 
-GPLv3
+GPL-3.0。联系：gtoxlili@outlook.com
