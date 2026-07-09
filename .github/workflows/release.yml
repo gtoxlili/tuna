@@ -77,6 +77,12 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # The Linux target pulls in alsa-sys (via the audio stack), whose build.rs
+      # needs the ALSA dev headers — not preinstalled on the stock ubuntu runner.
+      - name: install linux system deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
       - name: build release
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
