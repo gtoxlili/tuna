@@ -1,9 +1,15 @@
 name: release
 
-# Build release binaries for macOS (arm64 + x86_64), Linux (x86_64), Windows (x86_64),
-# attach them to a GitHub Release on tag push, and sign each artifact with a build
-# provenance attestation. Manual dispatch builds + uploads workflow artifacts without
-# cutting a release.
+# Build release binaries for macOS (arm64 + x86_64), Linux (x86_64), Windows,
+# publish a GitHub Release, and sign each artifact with a build-provenance
+# attestation — all on every push to main that touches the app's build inputs.
+#
+# No manual tagging: the `tag` job derives v<major>.<minor>.<patch> (patch = a
+# monotone commit-count over the same build-input paths) and pushes it *within
+# this run*, so the build/release jobs just depend on it via `needs`. Because
+# nothing listens for the tag as a workflow trigger, it can be pushed with the
+# default GITHUB_TOKEN — no PAT required (a GITHUB_TOKEN-pushed tag is silently
+# ignored by an `on: push: tags` trigger, but we don't use one).
 #
 # sherpa-onnx statically links a C++ lib whose build.rs fetches a prebuilt archive per
 # target triple (os+arch, not full triple). All four matrix targets have prebuilts;
@@ -13,18 +19,93 @@ name: release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'assets/**'
+      - '.github/workflows/release.yml'
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  # Bootstrap value used only when the repo has no existing v* tag yet; once one
+  # exists the `tag` job reads major.minor from the highest one. Bumping
+  # major/minor is a one-time manual `git tag v0.2.0 && git push --tags`.
+  INITIAL_MAJOR_MINOR: '0.1'
 
 permissions:
   contents: read
 
+# Serialize runs — two pushes racing the tag push / release create would error.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  tag:
+    name: resolve version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so rev-list --count sees every commit; fetch-tags so we
+          # can derive major.minor from existing tags and detect duplicates.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Highest existing v<major>.<minor>.<patch> tag, version-aware so
+          # v0.1.10 sorts after v0.1.9 (lexical sort gets it wrong). The 'v[0-9]*'
+          # glob rejects stray non-version tags.
+          LATEST=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n1 || true)
+          if [ -n "$LATEST" ] && \
+             MM=$(echo "$LATEST" | sed -nE 's|^v([0-9]+\.[0-9]+)(\..*)?$|\1|p') && \
+             [ -n "$MM" ]; then
+              MAJOR_MINOR="$MM"
+              echo "MAJOR_MINOR=${MAJOR_MINOR} (from existing tag ${LATEST})"
+          else
+              MAJOR_MINOR='${{ env.INITIAL_MAJOR_MINOR }}'
+              echo "MAJOR_MINOR=${MAJOR_MINOR} (no prior tag, using bootstrap)"
+          fi
+
+          # Patch = commits that touched build inputs — same scope as the trigger,
+          # so doc-only churn neither tags nor inflates the version.
+          COUNT=$(git rev-list --count HEAD -- src Cargo.toml Cargo.lock .cargo assets)
+          TAG="v${MAJOR_MINOR}.${COUNT}"
+          echo "Resolved tag: ${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Push tag if new
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.version.outputs.tag }}'
+          # Idempotent: a re-run on the same commit finds the tag already on origin
+          # and skips instead of failing the push.
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q .; then
+              echo "::notice::tag ${TAG} already on origin; re-run on same commit, skipping push"
+              exit 0
+          fi
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git tag -a "${TAG}" -m "Auto-tag ${TAG} at ${GITHUB_SHA}"
+          git push origin "${TAG}"
+          echo "::notice::pushed tag ${TAG}"
+
   build:
     name: build (${{ matrix.target }})
+    needs: tag
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -93,10 +174,11 @@ jobs:
       # root, so a nested staging dir would break the Formula.
       - name: package (unix)
         if: matrix.archive == 'tar.gz'
+        env:
+          VER: ${{ needs.tag.outputs.tag }}
         run: |
-          ver="${{ github.ref_name }}"
-          [ -z "$ver" ] && ver="dev"
-          staging="tuna-$ver-${{ matrix.target }}"
+          ver="${VER:-dev}"
+          staging="tuna-${ver}-${{ matrix.target }}"
           mkdir "$staging"
           cd "$staging"
           cp "../target/${{ matrix.target }}/release/tuna" .
@@ -109,10 +191,11 @@ jobs:
       - name: package (windows)
         if: matrix.archive == 'zip'
         shell: pwsh
+        env:
+          VER: ${{ needs.tag.outputs.tag }}
         run: |
-          $ver = "${{ github.ref_name }}"
-          if (-not $ver) { $ver = "dev" }
-          $staging = "tuna-$ver-${{ matrix.target }}"
+          $ver = $env:VER; if (-not $ver) { $ver = "dev" }
+          $staging = "tuna-${ver}-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $staging | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/tuna.exe" "$staging/"
           Copy-Item README.md "$staging/" -ErrorAction SilentlyContinue
@@ -130,25 +213,23 @@ jobs:
 
       # Sign each artifact with a build-provenance attestation (Sigstore/Fulcio/Rekor,
       # free, no cosign needed). Lets users verify the binary came from this workflow
-      # via `gh attestation verify`. Only on real pushes (attest needs a ref).
+      # via `gh attestation verify`. Every run produces a release, so always attest.
       - name: attest build provenance
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
             tuna-*.${{ matrix.archive }}
 
   release:
-    # Only on a real tag: gather all per-target artifacts and attach them to a GitHub
-    # Release. On manual dispatch this job is skipped.
     name: publish release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [tag, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
+      # checkout so `gh` can resolve the repo from its remote (download-artifact
+      # alone leaves no .git for gh to introspect).
       - uses: actions/checkout@v4
 
       - name: download all artifacts
@@ -157,14 +238,21 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: create release
+      - name: create or update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
-          gh release create "$tag" \
-            --title "$tag" \
-            --generate-notes \
-            artifacts/tuna-*.tar.gz \
-            artifacts/tuna-*.zip \
-            artifacts/checksums-*.txt
+          set -euo pipefail
+          tag='${{ needs.tag.outputs.tag }}'
+          # Idempotent: a re-run on the same commit finds an existing release and
+          # re-uploads (clobber) instead of erroring on a duplicate create.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::notice::release $tag exists; uploading artifacts (clobber)"
+            gh release upload "$tag" \
+              artifacts/tuna-*.tar.gz artifacts/tuna-*.zip artifacts/checksums-*.txt --clobber
+          else
+            gh release create "$tag" \
+              --title "$tag" \
+              --generate-notes \
+              artifacts/tuna-*.tar.gz artifacts/tuna-*.zip artifacts/checksums-*.txt
+          fi
