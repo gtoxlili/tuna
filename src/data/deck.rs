@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rs_fsrs::{Card, Rating, ReviewLog};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::scheduler::state_from_i64;
@@ -158,9 +158,18 @@ pub const GRAPH_MEMBER_CAP: usize = 18;
 /// (by stability desc), ties broken alphabetically. Shared by app (cursor index)
 /// and view (render order) so the two never drift.
 pub fn sort_members(ms: &mut [GraphMember], word: &str) {
-    let rank = |m: &GraphMember| if m.word == word { 0 } else if m.introduced { 1 } else { 2 };
+    let rank = |m: &GraphMember| {
+        if m.word == word {
+            0
+        } else if m.introduced {
+            1
+        } else {
+            2
+        }
+    };
     ms.sort_by(|a, b| {
-        rank(a).cmp(&rank(b))
+        rank(a)
+            .cmp(&rank(b))
             .then(b.stability.total_cmp(&a.stability))
             .then(a.word.cmp(&b.word))
     });
@@ -181,11 +190,11 @@ fn is_bond_worthy(surface: &str) -> bool {
 
 fn is_grammatical_suffix(core: &str) -> bool {
     const SUFFIXES: &[&str] = &[
-        "ion", "tion", "sion", "ation", "ition", "ive", "ative", "itive", "ate", "ous",
-        "ious", "eous", "ful", "less", "ness", "ment", "ity", "ety", "cy", "ance",
-        "ence", "ancy", "ency", "able", "ible", "ial", "ical", "ically", "ism", "ist",
-        "ize", "ise", "ify", "ing", "ish", "like", "ward", "wards", "wise", "hood",
-        "ship", "dom", "age", "ery", "ary", "ory", "ling", "some", "teen",
+        "ion", "tion", "sion", "ation", "ition", "ive", "ative", "itive", "ate", "ous", "ious",
+        "eous", "ful", "less", "ness", "ment", "ity", "ety", "cy", "ance", "ence", "ancy", "ency",
+        "able", "ible", "ial", "ical", "ically", "ism", "ist", "ize", "ise", "ify", "ing", "ish",
+        "like", "ward", "wards", "wise", "hood", "ship", "dom", "age", "ery", "ary", "ory", "ling",
+        "some", "teen",
     ];
     SUFFIXES.contains(&core)
 }
@@ -364,8 +373,19 @@ impl Deck {
                 let d: DictRow = serde_json::from_str(line)
                     .with_context(|| format!("parsing deck asset line: {line}"))?;
                 ins_dict.execute(params![
-                    d.word, d.sw, d.phonetic, d.translation, d.definition, d.pos,
-                    d.collins, d.oxford, d.bnc, d.frq, d.exchange, d.tag, d.priority,
+                    d.word,
+                    d.sw,
+                    d.phonetic,
+                    d.translation,
+                    d.definition,
+                    d.pos,
+                    d.collins,
+                    d.oxford,
+                    d.bnc,
+                    d.frq,
+                    d.exchange,
+                    d.tag,
+                    d.priority,
                 ])?;
                 ins_card.execute(params![d.word, now])?;
                 n += 1;
@@ -400,16 +420,22 @@ impl Deck {
     pub fn stats(&self) -> Result<DeckStats> {
         let now = Utc::now();
         let mut s = DeckStats::default();
-        s.words = self.conn.query_row("SELECT COUNT(*) FROM dict", [], |r| r.get(0))?;
-        s.cards = self.conn.query_row("SELECT COUNT(*) FROM card", [], |r| r.get(0))?;
+        s.words = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM dict", [], |r| r.get(0))?;
+        s.cards = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM card", [], |r| r.get(0))?;
         s.new = self
             .conn
-            .query_row("SELECT COUNT(*) FROM card WHERE state = 0", [], |r| r.get(0))?;
-        s.introduced = self.conn.query_row(
-            "SELECT COUNT(*) FROM card WHERE introduced = 1",
-            [],
-            |r| r.get(0),
-        )?;
+            .query_row("SELECT COUNT(*) FROM card WHERE state = 0", [], |r| {
+                r.get(0)
+            })?;
+        s.introduced =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM card WHERE introduced = 1", [], |r| {
+                    r.get(0)
+                })?;
         s.due_now = self.conn.query_row(
             "SELECT COUNT(*) FROM card WHERE due <= ?1",
             params![now],
@@ -543,7 +569,9 @@ impl Deck {
         )?;
         // Pairwise word↔word relations only (cognate_root is derived, never stored).
         for ge in &e.graph_edges {
-            if ge.target.is_empty() || !matches!(ge.relation.as_str(), "synonym" | "antonym" | "confusable") {
+            if ge.target.is_empty()
+                || !matches!(ge.relation.as_str(), "synonym" | "antonym" | "confusable")
+            {
                 continue;
             }
             self.conn.execute(
@@ -668,8 +696,8 @@ impl Deck {
         // — else `president`(praesidēns) collapses onto `prae-` and links to `prevent`.
         // Sub-4 prefixes (pre/pro/sub/con…) are already ineligible via the length gate.
         const PREFIX_FOLDS: &[&str] = &[
-            "prae", "super", "supra", "hyper", "inter", "intra", "trans", "contra",
-            "circum", "extra", "ultra", "retro", "fore", "anti", "para", "peri",
+            "prae", "super", "supra", "hyper", "inter", "intra", "trans", "contra", "circum",
+            "extra", "ultra", "retro", "fore", "anti", "para", "peri",
         ];
 
         struct Node {

@@ -88,4 +88,4 @@ uv run scripts/narrate.py  # 词根聚类 + 受控 LLM → assets/{morphemes,enr
 
 ## 许可
 
-GPL-3.0。联系：gtoxlili@outlook.com
+GPL-3.0-or-later。联系：gtoxlili@outlook.com

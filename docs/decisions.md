@@ -32,10 +32,9 @@ ROI 最高;政治大纲每年 9 月才更新,7 月做政治词卡等于背要作
 
 DeepSeek 只交出词素 + 你可能已掌握的锚点 + derive-it-yourself 谜题,**不交让你被动吸收的段落**。
 
-### 设计评审团拒绝"85% rule"
+### 拒绝"85% rule"
 
-称其为"misappropriated ML result dressed as human-learning science — the same sin as a hallucinated
-root"。
+85% rule 是对 ML 研究结果的误用,套到人类学习上不成立,和臆造词根是同一类错误。
 
 ## M0 — 耳机门 + CoreAudio 枚举
 
@@ -213,11 +212,9 @@ macOS 专属架构,`coreaudio-sys` + `core-foundation` 是无条件依赖,Window
 
 三平台 cfg 门 + cpal 后端 + 按名字绑定降级落地后,跨平台移植完成。
 
-## 交互艺术品级打磨 v3(深度对抗 review + 系统级重构)
+## 交互系统重构 v3
 
-v2 的对抗 review 仍是清单式浅走查;↑↓ 只是引子,整个交互系统需要更深评估。委派 3 个子 agent
-(代码状态审计 / 深度对抗 review 发现 30 个 v2 漏掉的 bug / TUI 最佳实践研究 Helix·lazygit·yazi·
-Zellij·atuin·gh-dash·btop·Anki AJT)后,做以下决策:
+对 v2 交互做系统级重评估后,确定以下决策:
 
 - **Tab 命令菜单而非 which-key popup / `:` command palette**:用户明示"通过方向键等去进行交互"。
   which-key popup 仍字母驱动(Space+letter);`:` palette 6 个命令不需要 fuzzy 搜索。Tab 菜单是方向键

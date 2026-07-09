@@ -37,6 +37,8 @@ src/
 └── ui/
     ├── app.rs         App 状态机:Stage/Strike/Ask/Gate;on_key 事件路由;后台轮询
     ├── view.rs        纯渲染:render() + render_ask/constellation/strike 等子视图
+    ├── cmdmenu.rs     Tab 命令菜单(方向键驱动的命令选择,主交互入口)
+    ├── settings.rs    TTS 引擎切换 overlay
     ├── theme.rs       调色板(墨底/phosphor-teal/amber)
     └── mod.rs         run()(同步事件循环)+ preview()(TestBackend 无 TTY 验证)
 ```
@@ -112,7 +114,7 @@ src/
 | `tuna`(或 `tuna study`) | ✓ | 学习会话 |
 | `tuna ask <word>` | ✓ | 苏格拉底辨析(需密钥) |
 | `tuna deck-info` | ✓ | 牌组统计 + 频率序队列 |
-| `tuna probe` | ✓ | 列 CoreAudio 设备(UID/transport/out-streams) |
+| `tuna probe` | ✓ | 列音频设备(UID/transport/out-streams),跨平台 |
 | `tuna gate-test [needle]` | ✓ | 测试音只走绑定耳机;不在场静默 |
 | `tuna setup` | ✓ | 重跑设置向导(重绑耳机/重设密钥/下模型) |
 | `tuna build-deck` | 隐藏 | 维护者:从 ECDICT 建开发库 |

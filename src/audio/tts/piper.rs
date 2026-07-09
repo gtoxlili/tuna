@@ -17,8 +17,7 @@ const MODEL: &str = "en_US-lessac-medium.onnx";
 const TOKENS: &str = "tokens.txt";
 const ESPEAK: &str = "espeak-ng-data";
 
-const TARBALL_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2";
+const TARBALL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2";
 const TARBALL_MB: usize = 63;
 
 impl PiperEngine {

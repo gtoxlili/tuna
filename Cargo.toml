@@ -36,7 +36,7 @@ coreaudio-sys = "0.2.18"
 # Production build. Whole-program optimization for a finished-product binary.
 [profile.release]
 opt-level = 3        # max runtime optimization
-lto = "fat"          # whole-program LTO across every crate (incl. ort/ratatui/rusqlite)
+lto = "fat"          # whole-program LTO across every crate (incl. sherpa-onnx/ratatui/rusqlite)
 codegen-units = 1    # one unit → the optimizer sees everything, no cross-unit blind spots
 strip = "symbols"    # drop the symbol table + debuginfo (smaller binary)
 panic = "unwind"     # DELIBERATE: the TUI restores the terminal while unwinding on panic;

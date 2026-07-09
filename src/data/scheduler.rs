@@ -6,7 +6,7 @@
 //!   Again = blanked · Hard = needed the hint · Good = derived with effort · Easy = derived instantly.
 
 use chrono::{DateTime, Utc};
-use rs_fsrs::{Card, Rating, RecordLog, SchedulingInfo, FSRS};
+use rs_fsrs::{Card, FSRS, Rating, RecordLog, SchedulingInfo};
 
 pub struct Scheduler {
     fsrs: FSRS,

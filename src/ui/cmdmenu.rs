@@ -6,11 +6,11 @@
 //! Overlay priority sits below settings/ask/graph (those swallow input first) but
 //! above help and the base card. Closing the menu is Tab or Esc; opening it is Tab.
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
-use ratatui::Frame;
 
 use super::app::App;
 use super::theme::*;
@@ -35,9 +35,9 @@ pub struct CommandItem {
 impl CommandMenu {
     /// Build the live command list for the current app state. The set is small and
     /// fixed; the only dynamic bit is whether 撤销评分 is selectable (needs a fresh
-    /// grade_flash) and whether 帮助 closes the menu or opens the overlay.
+    /// grade within the 3s undo window).
     pub fn items(&self, app: &App) -> Vec<CommandItem> {
-        let undo_enabled = app.grade_flash().is_some();
+        let undo_enabled = app.can_undo();
         vec![
             CommandItem {
                 label: "辨析",

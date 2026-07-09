@@ -36,8 +36,8 @@ pub fn run(deck_path: &Path) -> Result<()> {
 /// Render the study screen to an in-memory buffer and print it as text — lets us
 /// verify layout/content without an interactive TTY. Shows both card stages.
 pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     let cfg = Config::load()?;
     let mut app = App::new(deck_path, &cfg)?;
@@ -53,9 +53,8 @@ pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
     }
     let mut term = Terminal::new(TestBackend::new(96, 32))?;
 
-    app.input = "圈起来 → 限制".to_string();
     term.draw(|f| view::render(f, &app))?;
-    println!("── PROMPT (derive game) ──\n{}", term.backend());
+    println!("── PROMPT ──\n{}", term.backend());
 
     if let Some(c) = app.current.as_mut() {
         c.stage = app::Stage::Revealed;
@@ -64,9 +63,17 @@ pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
         }
     }
     term.draw(|f| view::render(f, &app))?;
-    println!("\n── REVEALED (+ 星火接线 prompt if anchor) ──\n{}", term.backend());
+    println!(
+        "\n── REVEALED (+ 星火接线 prompt if anchor) ──\n{}",
+        term.backend()
+    );
 
-    if app.current.as_ref().map(|c| c.anchor.is_some()).unwrap_or(false) {
+    if app
+        .current
+        .as_ref()
+        .map(|c| c.anchor.is_some())
+        .unwrap_or(false)
+    {
         if let Some(c) = app.current.as_mut() {
             c.strike = app::Strike::Flipped;
         }
@@ -78,8 +85,7 @@ pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
         if let Some(c) = app.current.as_mut() {
             c.strike = app::Strike::Idle;
         }
-        app.strike_anim =
-            Some(std::time::Instant::now() - std::time::Duration::from_millis(200));
+        app.strike_anim = Some(std::time::Instant::now() - std::time::Duration::from_millis(200));
         term.draw(|f| view::render(f, &app))?;
         println!("\n── STRIKE ARC (mid-fire) ──\n{}", term.backend());
     }

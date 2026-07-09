@@ -3,15 +3,15 @@
 //! status; selecting an already-downloaded engine writes config, reloads TtsConfig,
 //! and drops the warm session so the next synth uses the new engine.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
-use ratatui::Frame;
 
 use super::app::App;
 use super::theme::*;
-use crate::audio::tts::{from_kind, TtsEngineKind};
+use crate::audio::tts::{TtsEngineKind, from_kind};
 use crate::paths;
 
 pub struct Settings {
@@ -21,7 +21,10 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { open: false, cursor: 0 }
+        Self {
+            open: false,
+            cursor: 0,
+        }
     }
 }
 
@@ -64,10 +67,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
         lines.push(Line::from(vec![
             Span::styled(mark.to_string(), Style::default().fg(CURRENT)),
-            Span::styled(
-                format!("{:<8}", kind.id()),
-                row_style,
-            ),
+            Span::styled(format!("{:<8}", kind.id()), row_style),
             Span::styled(" · ", Style::default().fg(MUTED)),
             Span::styled(eng.blurb().to_string(), Style::default().fg(FOAM_DIM)),
             Span::styled("  ", Style::default().fg(MUTED)),
@@ -92,7 +92,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .style(Style::default().bg(SLATE).fg(FOAM))
         .padding(Padding::new(2, 2, 1, 1));
     frame.render_widget(
-        Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
         popup,
     );
 }

@@ -2,7 +2,7 @@
 //! voice). All file *locations* come from `paths`, so the config is portable as-is.
 //! `DEEPSEEK_API_KEY` in the environment overrides the file.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Deserialize;
 
 use crate::audio::tts::{TtsConfig, TtsEngineKind};

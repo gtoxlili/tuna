@@ -2,13 +2,15 @@
 //! and a context keybar. English/morphemes read as the machine's derivation voice;
 //! the ZH meaning you arrive at glows amber.
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
-use ratatui::Frame;
 
-use super::app::{App, Ask, CardView, MORPHEME_CELL_FADE_MS, MORPHEME_STAGGER_MS, Stage, Strike};
+use super::app::{
+    App, Ask, CardView, DeriveState, MORPHEME_CELL_FADE_MS, MORPHEME_STAGGER_MS, Stage, Strike,
+};
 use super::settings;
 use super::theme::*;
 use crate::data::deck::parse_exchange;
@@ -27,9 +29,7 @@ fn blend(a: Color, b: Color, t: f64) -> Color {
         Color::Rgb(r, g, b) => (r, g, b),
         _ => return b,
     };
-    let lerp = |x: u8, y: u8| -> u8 {
-        (x as f64 * (1.0 - t) + y as f64 * t).round() as u8
-    };
+    let lerp = |x: u8, y: u8| -> u8 { (x as f64 * (1.0 - t) + y as f64 * t).round() as u8 };
     Color::Rgb(lerp(ar, br), lerp(ag, bg), lerp(ab, bb))
 }
 
@@ -61,6 +61,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
     render_keybar(frame, chunks[2], app);
     render_ask(frame, area, app);
+    render_derive_chat(frame, area, app);
     render_constellation(frame, area, app);
     settings::render(frame, area, app);
     super::cmdmenu::render(frame, area, app);
@@ -131,11 +132,7 @@ fn render_constellation(frame: &mut Frame, area: Rect, app: &App) {
         let mut chips: Vec<Span> = Vec::new();
         for m in ms.iter().take(CAP) {
             let is_cursor = flat_i == app.graph_cursor;
-            let (color, mark) = if is_cursor {
-                (CURRENT, "▸")
-            } else {
-                glow(m)
-            };
+            let (color, mark) = if is_cursor { (CURRENT, "▸") } else { glow(m) };
             let style = if m.word == word || is_cursor {
                 let mut s = Style::default().fg(color).add_modifier(Modifier::BOLD);
                 if is_cursor {
@@ -247,6 +244,77 @@ fn render_ask(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// The derivation chat popup (Phase A "拆"): a multi-turn conversation with the LLM
+/// where the learner guesses the word's meaning from its morphemes and gets Socratic
+/// guidance. Shows the conversation history (scrollable) + an input line at the bottom.
+fn render_derive_chat(frame: &mut Frame, area: Rect, app: &App) {
+    if app.derive == DeriveState::Closed {
+        return;
+    }
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Conversation history — each turn labeled by role.
+    for turn in &app.derive_turns {
+        if turn.is_user {
+            lines.push(Line::from(vec![
+                Span::styled("你  ", Style::default().fg(CURRENT)),
+                Span::styled(turn.text.clone(), Style::default().fg(FOAM)),
+            ]));
+        } else {
+            let md = tui_markdown::from_str(&turn.text);
+            lines.push(Line::from(vec![Span::styled(
+                "✦  ",
+                Style::default().fg(AMBER),
+            )]));
+            lines.extend(md.lines);
+        }
+        lines.push(Line::raw(""));
+    }
+
+    // Input line or pending spinner.
+    if app.derive == DeriveState::Pending {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", spin(app)), Style::default().fg(CURRENT)),
+            Span::styled("思考中……", Style::default().fg(FOAM_DIM)),
+        ]));
+    } else {
+        let input_span = if app.input.is_empty() {
+            Span::styled("说说你看到了哪些词素……", Style::default().fg(MUTED))
+        } else {
+            Span::styled(app.input.clone(), Style::default().fg(FOAM))
+        };
+        lines.push(Line::from(vec![
+            Span::styled("▸  ", Style::default().fg(CURRENT)),
+            input_span,
+            Span::styled("▋", Style::default().fg(CURRENT)),
+        ]));
+    }
+
+    // Footer.
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "Enter 发送 · Esc 关闭 · ↑↓ 滚动",
+        Style::default().fg(MUTED),
+    )));
+
+    let popup = centered_rect(72, 72, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(CURRENT))
+        .title(" 推导 · 和 AI 一起拆词 ")
+        .title_style(Style::default().fg(CURRENT).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(SLATE).fg(FOAM))
+        .padding(Padding::new(2, 2, 1, 1));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((app.derive_scroll as u16, 0)),
+        popup,
+    );
+}
+
 fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
     let [h] = Layout::horizontal([Constraint::Percentage(pct_x)])
         .flex(Flex::Center)
@@ -292,15 +360,18 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("拆联 ", Style::default().fg(MUTED)),
         Span::styled(app.session_new.to_string(), Style::default().fg(CURRENT)),
         Span::styled("  复习 ", Style::default().fg(MUTED)),
-        Span::styled(app.session_reviews.to_string(), Style::default().fg(CURRENT)),
+        Span::styled(
+            app.session_reviews.to_string(),
+            Style::default().fg(CURRENT),
+        ),
         Span::styled("  剩 ", Style::default().fg(MUTED)),
         Span::styled(app.remaining().to_string(), Style::default().fg(FOAM_DIM)),
         Span::styled(format!("  {pos_label}"), Style::default().fg(MUTED)),
     ])
     .alignment(Alignment::Right);
 
-    let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
+    let cols =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
     frame.render_widget(
         Paragraph::new(Line::from(gate)).style(Style::default().bg(SLATE)),
         cols[0],
@@ -327,7 +398,12 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
 
     // headword + IPA
     let speak_mark = if c.stage == Stage::Revealed && c.speak_cursor == 0 {
-        Span::styled("▸ ", Style::default().fg(CURRENT).add_modifier(Modifier::REVERSED))
+        Span::styled(
+            "▸ ",
+            Style::default()
+                .fg(CURRENT)
+                .add_modifier(Modifier::REVERSED),
+        )
     } else {
         Span::raw("  ")
     };
@@ -370,9 +446,13 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
     match (c.stage, &c.enrichment) {
         // Phase A, enriched — the derivation experience
         (Stage::Prompt, Some(en)) if c.is_new => morpheme_prompt(&mut lines, en, &owned),
-        (Stage::Revealed, Some(en)) if c.is_new => {
-            derivation_reveal(&mut lines, en, c.speak_cursor, app.reveal_elapsed_ms(), &owned)
-        }
+        (Stage::Revealed, Some(en)) if c.is_new => derivation_reveal(
+            &mut lines,
+            en,
+            c.speak_cursor,
+            app.reveal_elapsed_ms(),
+            &owned,
+        ),
         // Prompt (review, or un-enriched new)
         (Stage::Prompt, _) => {
             let prompt = if c.is_new {
@@ -389,32 +469,15 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
         (Stage::Revealed, _) => plain_meaning(&mut lines, c),
     }
 
-    // Derive game (Phase A): the typed guess, echoed back on reveal to compare.
-    if c.is_new {
-        match c.stage {
-            Stage::Prompt => {
-                lines.push(Line::raw(""));
-                let mut spans = vec![Span::styled("你的推测  ", Style::default().fg(MUTED))];
-                if app.input.is_empty() {
-                    spans.push(Span::styled(
-                        "打下你推出的意思，Enter 揭示…",
-                        Style::default().fg(MUTED),
-                    ));
-                } else {
-                    spans.push(Span::styled(app.input.clone(), Style::default().fg(FOAM)));
-                }
-                spans.push(Span::styled("▋", Style::default().fg(CURRENT)));
-                lines.push(Line::from(spans));
-            }
-            Stage::Revealed if !app.input.is_empty() => {
-                lines.push(Line::raw(""));
-                lines.push(Line::from(vec![
-                    Span::styled("你刚推  ", Style::default().fg(MUTED)),
-                    Span::styled(app.input.clone(), Style::default().fg(FOAM_DIM)),
-                ]));
-            }
-            _ => {}
-        }
+    // Derive chat hint (Phase A Prompt): invite the learner to chat with the LLM
+    // about the derivation. The chat itself opens via `a` (see render_derive_chat).
+    if c.is_new && matches!(c.stage, Stage::Prompt) {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled("想拆词？按 ", Style::default().fg(MUTED)),
+            Span::styled("a", Style::default().fg(CURRENT)),
+            Span::styled(" 和 AI 一起推导", Style::default().fg(MUTED)),
+        ]));
     }
 
     // 星火接线 — after the reveal, EARN the edge by recalling a learned sibling.
@@ -475,7 +538,10 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
                         spans.push(Span::styled(w.clone(), Style::default().fg(GREEN)));
                     }
                     if let Some((_, via)) = c.siblings.first() {
-                        spans.push(Span::styled(format!("   同根 {via}"), Style::default().fg(MUTED)));
+                        spans.push(Span::styled(
+                            format!("   同根 {via}"),
+                            Style::default().fg(MUTED),
+                        ));
                     }
                     lines.push(Line::from(spans));
                 }
@@ -483,16 +549,21 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
                     lines.push(Line::raw(""));
                     let total = 12usize;
                     let filled = ((p * total as f64).round() as usize).min(total);
-                    let bar = format!(
-                        "{}{}",
-                        "━".repeat(filled),
-                        "╌".repeat(total - filled)
-                    );
+                    let bar = format!("{}{}", "━".repeat(filled), "╌".repeat(total - filled));
                     let mut spans = vec![
-                        Span::styled("✦ ", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-                        Span::styled(a.word.clone(), Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "✦ ",
+                            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            a.word.clone(),
+                            Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(format!(" {bar}⟶ "), Style::default().fg(AMBER)),
-                        Span::styled(&c.entry.word, Style::default().fg(CURRENT).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            &c.entry.word,
+                            Style::default().fg(CURRENT).add_modifier(Modifier::BOLD),
+                        ),
                     ];
                     if p >= 0.9 {
                         spans.push(Span::styled(
@@ -517,7 +588,9 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
             rs_fsrs::Rating::Good => GREEN,
             rs_fsrs::Rating::Easy => CURRENT,
         };
-        let ratatui::style::Color::Rgb(r, g, b) = base else { return None };
+        let ratatui::style::Color::Rgb(r, g, b) = base else {
+            return None;
+        };
         Some(ratatui::style::Color::Rgb(
             ((r as f32 * strength) + ABYSS_R as f32 * (1.0 - strength)) as u8,
             ((g as f32 * strength) + ABYSS_G as f32 * (1.0 - strength)) as u8,
@@ -557,7 +630,11 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
 
 /// The morpheme cells. Ownership is no longer a baked flag on the morpheme — it
 /// surfaces through the live "你学过" siblings line (P2 will color cells by real mastery).
-fn morpheme_cells(en: &Enrichment, reveal_ms: Option<u128>, owned: &[String]) -> Vec<Span<'static>> {
+fn morpheme_cells(
+    en: &Enrichment,
+    reveal_ms: Option<u128>,
+    owned: &[String],
+) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (i, m) in en.morphemes.iter().enumerate() {
         if i > 0 {
@@ -576,9 +653,7 @@ fn morpheme_cells(en: &Enrichment, reveal_ms: Option<u128>, owned: &[String]) ->
         // below eases from MUTED up to the target color so the stagger still reads.
         let is_owned = owned.iter().any(|s| s.eq_ignore_ascii_case(&m.unit));
         let target_color = if is_owned { GREEN } else { CURRENT };
-        let dim = |target: Color, p: f64| -> Color {
-            blend(target, MUTED, 1.0 - p)
-        };
+        let dim = |target: Color, p: f64| -> Color { blend(target, MUTED, 1.0 - p) };
         let unit_color = cell_p.map(|p| dim(target_color, p)).unwrap_or(target_color);
         let meaning_color = cell_p.map(|p| dim(FOAM_DIM, p)).unwrap_or(FOAM_DIM);
         spans.push(Span::styled("⟦ ", Style::default().fg(MUTED)));
@@ -625,7 +700,13 @@ fn morpheme_prompt(lines: &mut Vec<Line>, en: &Enrichment, owned: &[String]) {
 }
 
 /// Phase A reveal: the derivation chain, meaning, honest etymology, examples, confusables.
-fn derivation_reveal(lines: &mut Vec<Line>, en: &Enrichment, speak_cursor: usize, reveal_ms: Option<u128>, owned: &[String]) {
+fn derivation_reveal(
+    lines: &mut Vec<Line>,
+    en: &Enrichment,
+    speak_cursor: usize,
+    reveal_ms: Option<u128>,
+    owned: &[String],
+) {
     if !en.morphemes.is_empty() {
         lines.push(Line::from(morpheme_cells(en, reveal_ms, owned)));
         lines.push(Line::raw(""));
@@ -687,7 +768,12 @@ fn derivation_reveal(lines: &mut Vec<Line>, en: &Enrichment, speak_cursor: usize
             continue;
         }
         let speak_mark = if speak_cursor == shown + 1 {
-            Span::styled("▸ ", Style::default().fg(CURRENT).add_modifier(Modifier::REVERSED))
+            Span::styled(
+                "▸ ",
+                Style::default()
+                    .fg(CURRENT)
+                    .add_modifier(Modifier::REVERSED),
+            )
         } else {
             Span::raw("  ")
         };
@@ -800,7 +886,9 @@ fn render_done(frame: &mut Frame, area: Rect, app: &App) {
         .style(Style::default().bg(ABYSS))
         .padding(Padding::new(4, 4, 2, 1));
     frame.render_widget(
-        Paragraph::new(lines).block(block).alignment(Alignment::Center),
+        Paragraph::new(lines)
+            .block(block)
+            .alignment(Alignment::Center),
         area,
     );
 }
@@ -810,7 +898,11 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
         app.current.as_ref().map(|c| (c.is_new, c.stage)),
         Some((true, Stage::Prompt))
     );
-    let strike = app.current.as_ref().map(|c| c.strike).unwrap_or(Strike::Idle);
+    let strike = app
+        .current
+        .as_ref()
+        .map(|c| c.strike)
+        .unwrap_or(Strike::Idle);
     let spans = if app.done() {
         vec![key("Esc", "退出", CORAL)]
     } else if strike == Strike::Prompt {
@@ -822,12 +914,13 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
             key("Esc", "跳过", MUTED),
         ]
     } else if is_new_prompt {
-        // Derive game: every printable key builds the guess, so the keybar shows only
-        // what actually fires. Command shortcuts (a/g/s/w) unlock after Enter reveals.
+        // New word Prompt: shortcuts are live (no input capture). `a` opens the
+        // derivation chat; Enter reveals the full derivation chain.
         vec![
             key("Enter", "揭示", CURRENT),
+            key("a", "推导", AMBER),
             key("Space", "发音", MUTED),
-            key("⌫", "删字", MUTED),
+            key("Tab", "命令", MUTED),
             key("?", "帮助", MUTED),
             key("Esc", "再按退出", MUTED),
         ]
@@ -836,6 +929,7 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
             Some(Stage::Prompt) => vec![
                 key("Enter", "揭示", CURRENT),
                 key("Space", "发音", MUTED),
+                key("Tab", "命令", MUTED),
                 key("?", "帮助", MUTED),
                 key("Esc", "再按退出", MUTED),
             ],
@@ -846,10 +940,38 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
                 // users too — the reversed chip is a structural cue, not just hue).
                 let flash_rating = app.grade_flash().map(|(r, _)| r);
                 vec![
-                    grade_key("1", "Again", &hints[0], CORAL, "✗", flash_rating == Some(rs_fsrs::Rating::Again)),
-                    grade_key("2", "Hard", &hints[1], AMBER, "△", flash_rating == Some(rs_fsrs::Rating::Hard)),
-                    grade_key("3", "Good", &hints[2], GREEN, "○", flash_rating == Some(rs_fsrs::Rating::Good)),
-                    grade_key("4", "Easy", &hints[3], CURRENT, "✦", flash_rating == Some(rs_fsrs::Rating::Easy)),
+                    grade_key(
+                        "1",
+                        "Again",
+                        &hints[0],
+                        CORAL,
+                        "✗",
+                        flash_rating == Some(rs_fsrs::Rating::Again),
+                    ),
+                    grade_key(
+                        "2",
+                        "Hard",
+                        &hints[1],
+                        AMBER,
+                        "△",
+                        flash_rating == Some(rs_fsrs::Rating::Hard),
+                    ),
+                    grade_key(
+                        "3",
+                        "Good",
+                        &hints[2],
+                        GREEN,
+                        "○",
+                        flash_rating == Some(rs_fsrs::Rating::Good),
+                    ),
+                    grade_key(
+                        "4",
+                        "Easy",
+                        &hints[3],
+                        CURRENT,
+                        "✦",
+                        flash_rating == Some(rs_fsrs::Rating::Easy),
+                    ),
                     sep(),
                     key("↑↓", "选读", CURRENT),
                     key("Space", "发音", MUTED),
@@ -896,7 +1018,10 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
 
 fn key(k: &str, label: &str, color: ratatui::style::Color) -> Vec<Span<'static>> {
     vec![
-        Span::styled(format!(" {k} "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!(" {k} "),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!("{label} "), Style::default().fg(MUTED)),
     ]
 }
@@ -910,7 +1035,10 @@ fn grade_key(
     reverse: bool,
 ) -> Vec<Span<'static>> {
     let chip_style = if reverse {
-        Style::default().fg(ABYSS).bg(color).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(ABYSS)
+            .bg(color)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(color).add_modifier(Modifier::BOLD)
     };
@@ -953,34 +1081,56 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
         v
     };
     let mut lines: Vec<Line> = Vec::new();
-    lines.extend(group("导航", &[
-        ("Enter", "揭示（新词：从拆到联；复习：从问到答）"),
-        ("↑↓", "揭示后选读目标（单词 / 例句）；星座内导航；辨析弹窗滚动"),
-        ("Esc", "退一层：关浮层 / 跳过星火接线 / 再按一次退出（done 时单按即退）"),
-    ]));
-    lines.extend(group("发音", &[
-        ("Space", "朗读当前选中项（单词或例句），只走绑定耳机"),
-        ("s", "打开 TTS 引擎设置（Kokoro/Matcha/Piper 运行时切换）"),
-    ]));
-    lines.extend(group("FSRS 评分（揭示后）", &[
-        ("1 / h ✗ Again", "忘了 — 重置，很快再考（~1分）"),
-        ("2 / j △ Hard", "勉强 — 拉长间隔但标记吃力"),
-        ("3 / k ○ Good", "记得 — 正常推进（默认节奏）"),
-        ("4 / l ✦ Easy", "轻松 — 大幅拉长间隔"),
-    ]));
-    lines.extend(group("星火接线", &[
-        ("Space", "翻牌：揭示锚点词（已学同根词）"),
-        ("y", "记得 — 召回成功，刷新锚点"),
-        ("n", "想不起 — 记一次 lapse，诚实标注"),
-        ("Esc", "跳过这次接线（不评分，继续评新词）"),
-    ]));
-    lines.extend(group("扩展", &[
-        ("a", "辨析（有猜测时点评你的推理；否则泛辨析）"),
-        ("w", "打开 Wiktionary 词源页"),
-        ("g", "星座：当前词的词根家族（已学同根 + 一根之差的前沿）"),
-        ("⌫", "推导阶段删字"),
-        ("?", "本帮助（Esc/? 关闭，其他键穿透到下层）"),
-    ]));
+    lines.extend(group(
+        "导航",
+        &[
+            ("Enter", "揭示（新词：从拆到联；复习：从问到答）"),
+            (
+                "↑↓",
+                "揭示后选读目标（单词 / 例句）；星座内导航；辨析弹窗滚动",
+            ),
+            ("Tab", "打开命令菜单（↑↓ 选择，Enter 确认，字母直达）"),
+            (
+                "Esc",
+                "退一层：关浮层 / 跳过星火接线 / 再按一次退出（done 时单按即退）",
+            ),
+        ],
+    ));
+    lines.extend(group(
+        "发音",
+        &[
+            ("Space", "朗读当前选中项（单词或例句），只走绑定耳机"),
+            ("s", "打开 TTS 引擎设置（Kokoro/Matcha/Piper 运行时切换）"),
+        ],
+    ));
+    lines.extend(group(
+        "FSRS 评分（揭示后）",
+        &[
+            ("1 / h ✗ Again", "忘了 — 重置，很快再考（~1分）"),
+            ("2 / j △ Hard", "勉强 — 拉长间隔但标记吃力"),
+            ("3 / k ○ Good", "记得 — 正常推进（默认节奏）"),
+            ("4 / l ✦ Easy", "轻松 — 大幅拉长间隔"),
+            ("u", "撤销上次评分（3 秒内，仅限一步）"),
+        ],
+    ));
+    lines.extend(group(
+        "星火接线",
+        &[
+            ("Space", "翻牌：揭示锚点词（已学同根词）"),
+            ("y", "记得 — 召回成功，刷新锚点"),
+            ("n", "想不起 — 记一次 lapse，诚实标注"),
+            ("Esc", "跳过这次接线（不评分，继续评新词）"),
+        ],
+    ));
+    lines.extend(group(
+        "扩展",
+        &[
+            ("a", "新词：和 AI 一起推导（拆词游戏）；复习：苏格拉底辨析"),
+            ("w", "打开 Wiktionary 词源页"),
+            ("g", "星座：当前词的词根家族（已学同根 + 一根之差的前沿）"),
+            ("?", "本帮助（Esc/? 关闭，其他键穿透到下层）"),
+        ],
+    ));
 
     let popup = centered_rect(72, 78, area);
     frame.render_widget(Clear, popup);
@@ -992,7 +1142,9 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
         .style(Style::default().bg(SLATE).fg(FOAM))
         .padding(Padding::new(2, 2, 1, 1));
     frame.render_widget(
-        Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
         popup,
     );
 }

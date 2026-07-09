@@ -169,9 +169,8 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --target ${{ matrix.target }} --locked
 
-      # Package the binary at the archive root (flat, no nesting) — Homebrew's
-      # `bin.install "tuna"` looks for the binary relative to the extracted archive
-      # root, so a nested staging dir would break the Formula.
+      # Package the binary flat (at the archive root) — Homebrew's `bin.install`
+      # looks for the binary relative to the extracted archive root.
       - name: package (unix)
         if: matrix.archive == 'tar.gz'
         env:
@@ -180,12 +179,12 @@ jobs:
           ver="${VER:-dev}"
           staging="tuna-${ver}-${{ matrix.target }}"
           mkdir "$staging"
-          cd "$staging"
-          cp "../target/${{ matrix.target }}/release/tuna" .
-          cp ../README.md . 2>/dev/null || true
-          cp ../LICENSE . 2>/dev/null || true
-          cd ..
-          tar czf "$staging.tar.gz" "$staging"
+          cp "target/${{ matrix.target }}/release/tuna" "$staging/"
+          cp README.md "$staging/" 2>/dev/null || true
+          cp LICENSE "$staging/" 2>/dev/null || true
+          # -C staging so paths are relative to staging (flat, no nesting)
+          tar czf "$staging.tar.gz" -C "$staging" tuna README.md LICENSE 2>/dev/null \
+            || tar czf "$staging.tar.gz" -C "$staging" tuna
           shasum -a 256 "$staging.tar.gz" | tee checksums-${{ matrix.target }}.txt
 
       - name: package (windows)
@@ -200,7 +199,8 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/tuna.exe" "$staging/"
           Copy-Item README.md "$staging/" -ErrorAction SilentlyContinue
           Copy-Item LICENSE "$staging/" -ErrorAction SilentlyContinue
-          Compress-Archive -Path $staging -DestinationPath "$staging.zip"
+          # Flat: contents only, no wrapping directory
+          Compress-Archive -Path "$staging/*" -DestinationPath "$staging.zip"
           (Get-FileHash "$staging.zip" -Algorithm SHA256).Hash | Tee-Object "checksums-${{ matrix.target }}.txt"
 
       - name: upload artifact

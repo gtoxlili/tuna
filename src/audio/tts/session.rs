@@ -9,13 +9,13 @@
 
 use std::path::Path;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use sherpa_onnx::{
     GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig,
     OfflineTtsMatchaModelConfig, OfflineTtsModelConfig, OfflineTtsVitsModelConfig,
 };
 
-use super::{kokoro, matcha, piper, SynthSession, TtsConfig, TtsEngineKind, Voice};
+use super::{SynthSession, TtsConfig, TtsEngineKind, Voice, kokoro, matcha, piper};
 
 pub struct SherpaSession {
     tts: OfflineTts,
@@ -39,10 +39,7 @@ impl SherpaSession {
         };
         let tts = OfflineTts::create(&config)
             .context("sherpa OfflineTts::create returned None — model files missing or invalid")?;
-        Ok(Box::new(Self {
-            tts,
-            voices,
-        }))
+        Ok(Box::new(Self { tts, voices }))
     }
 }
 

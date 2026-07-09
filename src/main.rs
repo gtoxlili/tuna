@@ -153,7 +153,10 @@ fn synth_probe(text: &str, out: &std::path::Path) -> Result<()> {
         rms,
         peak
     );
-    println!("    首次合成耗时 {:.1}s（含图优化）", t0.elapsed().as_secs_f32());
+    println!(
+        "    首次合成耗时 {:.1}s（含图优化）",
+        t0.elapsed().as_secs_f32()
+    );
     Ok(())
 }
 
@@ -227,7 +230,11 @@ fn ask_cmd(word: &str) -> Result<()> {
                 .filter(|e| e.relation == "confusable" || e.relation == "synonym")
                 .map(|e| e.target.clone())
                 .collect();
-            format!("词义: {}\n易混/近义: {}", en.gloss_zh, neighbours.join(", "))
+            format!(
+                "词义: {}\n易混/近义: {}",
+                en.gloss_zh,
+                neighbours.join(", ")
+            )
         }
         None => String::new(),
     };
@@ -415,7 +422,9 @@ fn gate_test(needle: &str) -> Result<()> {
     // Open the stream on the bound cpal device (matched by the same name). If cpal
     // can't find it as an output device, treat as gate-closed rather than falling back.
     let Some(cpal_device) = player::find_output_device(&bound.name) else {
-        println!("\n  ✗ GATE CLOSED — CoreAudio saw the device but cpal could not open it as output.");
+        println!(
+            "\n  ✗ GATE CLOSED — CoreAudio saw the device but cpal could not open it as output."
+        );
         println!("    → holding silence (fail-closed).\n");
         return Ok(());
     };

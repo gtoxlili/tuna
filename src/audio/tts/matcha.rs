@@ -18,8 +18,7 @@ const TOKENS: &str = "tokens.txt";
 const ESPEAK: &str = "espeak-ng-data";
 const LEXICON: &str = "lexicon.txt";
 
-const TARBALL_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-en_US-ljspeech.tar.bz2";
+const TARBALL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-en_US-ljspeech.tar.bz2";
 const VOCODER_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/hifigan_v2.onnx";
 const TARBALL_MB: usize = 220;

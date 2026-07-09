@@ -39,8 +39,6 @@ pub struct Enrichment {
     pub collocations: Vec<String>,
     #[serde(default)]
     pub examples: Vec<Example>,
-    #[serde(default)]
-    pub derive_puzzle: Option<DerivePuzzle>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -50,10 +48,6 @@ pub struct Morpheme {
     pub kind: String,
     #[serde(default)]
     pub meaning_zh: String,
-    #[serde(default)]
-    pub gloss_en: String,
-    #[serde(default)]
-    pub cognates: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -61,8 +55,6 @@ pub struct GraphEdge {
     pub target: String,
     #[serde(default)]
     pub relation: String,
-    #[serde(default)]
-    pub via: String,
     #[serde(default)]
     pub why_zh: String,
 }
@@ -75,16 +67,6 @@ pub struct Example {
     pub zh: String,
     #[serde(default)]
     pub level: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct DerivePuzzle {
-    #[serde(default)]
-    pub given_zh: String,
-    #[serde(default)]
-    pub ask_zh: String,
-    #[serde(default)]
-    pub answer_zh: String,
 }
 
 /// Byte-stable system prefix — keep it constant so DeepSeek's prompt cache applies.

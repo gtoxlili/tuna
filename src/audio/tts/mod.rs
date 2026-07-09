@@ -45,7 +45,11 @@ impl TtsEngineKind {
     }
 
     pub fn all() -> [TtsEngineKind; 3] {
-        [TtsEngineKind::Kokoro, TtsEngineKind::Matcha, TtsEngineKind::Piper]
+        [
+            TtsEngineKind::Kokoro,
+            TtsEngineKind::Matcha,
+            TtsEngineKind::Piper,
+        ]
     }
 }
 

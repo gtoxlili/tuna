@@ -152,10 +152,7 @@ impl AudioProbe for CpalProbe {
 /// Find the bound earphone among output devices, matched case-insensitively by name
 /// substring. Prefers a Bluetooth-class match when several outputs share the needle —
 /// this is what disambiguates an AirPods output from a same-named HFP input on macOS.
-pub fn find_bound_output<'a>(
-    devices: &'a [DeviceInfo],
-    needle: &str,
-) -> Option<&'a DeviceInfo> {
+pub fn find_bound_output<'a>(devices: &'a [DeviceInfo], needle: &str) -> Option<&'a DeviceInfo> {
     let needle = needle.to_lowercase();
     let mut matches: Vec<&DeviceInfo> = devices
         .iter()

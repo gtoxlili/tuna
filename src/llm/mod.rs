@@ -6,7 +6,7 @@ pub mod socratic;
 
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 pub struct DeepSeek {
@@ -35,6 +35,20 @@ struct Msg<'a> {
 struct ResponseFormat {
     #[serde(rename = "type")]
     kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct MultiChatRequest<'a> {
+    model: &'a str,
+    messages: Vec<OwnedMsg>,
+    temperature: f32,
+    max_tokens: u32,
+}
+
+#[derive(Serialize)]
+struct OwnedMsg {
+    role: String,
+    content: String,
 }
 
 /// Token usage from one call (for cost reporting).
@@ -81,6 +95,46 @@ impl DeepSeek {
         self.chat(model, system, user, max_tokens, false)
     }
 
+    /// A multi-turn plain-text chat call. `messages` is a sequence of
+    /// (role, content) pairs — the first should be ("system", system_prompt),
+    /// followed by prior turns ("user" / "assistant") and the new user message.
+    pub fn chat_multi(
+        &self,
+        model: &str,
+        messages: Vec<(&str, String)>,
+        max_tokens: u32,
+    ) -> Result<String> {
+        let req = MultiChatRequest {
+            model,
+            messages: messages
+                .into_iter()
+                .map(|(role, content)| OwnedMsg {
+                    role: role.to_string(),
+                    content,
+                })
+                .collect(),
+            temperature: 0.4,
+            max_tokens,
+        };
+        let resp = self
+            .client
+            .post(format!("{}/chat/completions", self.base_url))
+            .bearer_auth(&self.api_key)
+            .json(&req)
+            .send()
+            .context("DeepSeek request failed (network?)")?;
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().context("DeepSeek response was not JSON")?;
+        if !status.is_success() {
+            bail!("DeepSeek error {status}: {body}");
+        }
+        let content = body["choices"][0]["message"]["content"]
+            .as_str()
+            .context("DeepSeek response had no message content")?
+            .to_string();
+        Ok(content)
+    }
+
     fn chat(
         &self,
         model: &str,
@@ -101,7 +155,9 @@ impl DeepSeek {
                     content: user,
                 },
             ],
-            response_format: json.then_some(ResponseFormat { kind: "json_object" }),
+            response_format: json.then_some(ResponseFormat {
+                kind: "json_object",
+            }),
             temperature: 0.3,
             max_tokens,
         };

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::audio::probe::{self, DeviceInfo};
-use crate::audio::tts::{from_kind, TtsEngineKind};
+use crate::audio::tts::{TtsEngineKind, from_kind};
 use crate::config::Config;
 use crate::paths;
 
@@ -73,7 +73,10 @@ fn banner(is_rerun: bool) {
         paint(MUTED, "词根推导终端")
     );
     if is_rerun {
-        println!("\n  {}\n", paint(MUTED, "设置向导 · 回车保留当前值 ────────"));
+        println!(
+            "\n  {}\n",
+            paint(MUTED, "设置向导 · 回车保留当前值 ────────")
+        );
     } else {
         println!("\n  {}\n", paint(MUTED, "首次运行 · 三步设置 ────────"));
     }
@@ -98,7 +101,10 @@ fn step_earphone(current: Option<&str>) -> String {
     if candidates.is_empty() {
         println!(
             "     {}",
-            paint(MUTED, "（暂未检测到合适的输出设备，连上后重开或先输入名字）")
+            paint(
+                MUTED,
+                "（暂未检测到合适的输出设备，连上后重开或先输入名字）"
+            )
         );
         let default = if cur.is_empty() { "airpods" } else { cur };
         let s = prompt(&format!(
@@ -113,7 +119,10 @@ fn step_earphone(current: Option<&str>) -> String {
     {
         println!(
             "     {}",
-            paint(MUTED, "（非 macOS：ALSA/WASAPI 设备名可能随重启漂移，如绑定失效请重跑 setup）")
+            paint(
+                MUTED,
+                "（非 macOS：ALSA/WASAPI 设备名可能随重启漂移，如绑定失效请重跑 setup）"
+            )
         );
     }
     // Pre-select the candidate matching the current needle, if any.
@@ -174,10 +183,16 @@ fn step_key(current: Option<&str>) -> String {
     } else {
         println!("     {}", paint(MUTED, "已设置，回车保留当前密钥。"));
     }
-    let key = prompt(&format!("     {} ", paint(TEAL, "▸ 粘贴密钥（回车跳过/保留）:")));
+    let key = prompt(&format!(
+        "     {} ",
+        paint(TEAL, "▸ 粘贴密钥（回车跳过/保留）:")
+    ));
     if key.is_empty() {
         if cur.is_empty() {
-            println!("     {}", paint(MUTED, "· 跳过，之后可在 ~/.tuna/config.toml 补上"));
+            println!(
+                "     {}",
+                paint(MUTED, "· 跳过，之后可在 ~/.tuna/config.toml 补上")
+            );
             String::new()
         } else {
             println!("     {}", paint(GREEN, "✓ 保留当前密钥"));
@@ -196,7 +211,10 @@ fn step_engine() -> (String, String) {
     println!("\n  {} {}", paint(TEAL, &bold("③")), bold("发音引擎"));
     println!(
         "     {}",
-        paint(MUTED, "本地 TTS，三个引擎任选。下齐才进入学习，之后按 Space 即刻发声。")
+        paint(
+            MUTED,
+            "本地 TTS，三个引擎任选。下齐才进入学习，之后按 Space 即刻发声。"
+        )
     );
 
     let kinds = TtsEngineKind::all();
@@ -213,10 +231,7 @@ fn step_engine() -> (String, String) {
         );
     }
 
-    let pick = prompt(&format!(
-        "     {} ",
-        paint(TEAL, "▸ 输入编号（回车用 1）:")
-    ));
+    let pick = prompt(&format!("     {} ", paint(TEAL, "▸ 输入编号（回车用 1）:")));
     let idx = pick
         .parse::<usize>()
         .ok()
@@ -241,11 +256,7 @@ fn step_engine() -> (String, String) {
     std::fs::create_dir_all(&engine_dir).ok();
     for dl in eng.downloads() {
         loop {
-            let is_tarball = dl
-                .dest
-                .extension()
-                .map(|e| e == "bz2")
-                .unwrap_or(false);
+            let is_tarball = dl.dest.extension().map(|e| e == "bz2").unwrap_or(false);
             let result = if is_tarball {
                 download_and_extract(&dl, &engine_dir)
             } else {
@@ -262,10 +273,7 @@ fn step_engine() -> (String, String) {
                         paint(TEAL, "▸ 重试？(y / 回车跳过，之后可重跑 tuna setup 补下):")
                     ));
                     if !again.eq_ignore_ascii_case("y") {
-                        println!(
-                            "     {}",
-                            paint(MUTED, "· 跳过，之后运行 tuna setup 补下")
-                        );
+                        println!("     {}", paint(MUTED, "· 跳过，之后运行 tuna setup 补下"));
                         return (chosen.id().to_string(), voice);
                     }
                 }
@@ -310,7 +318,10 @@ fn migrate_old_files() {
     }
     println!(
         "\n     {}",
-        paint(CORAL, "检测到旧版 Kokoro 文件（ort 管线），将删除并下载 sherpa 版。")
+        paint(
+            CORAL,
+            "检测到旧版 Kokoro 文件（ort 管线），将删除并下载 sherpa 版。"
+        )
     );
     for p in &stale {
         println!("       {}", paint(MUTED, &p.display().to_string()));

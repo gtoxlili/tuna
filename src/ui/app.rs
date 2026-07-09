@@ -150,6 +150,22 @@ pub enum Ask {
     Failed(String),
 }
 
+/// One turn in the derivation chat: the learner's message or the LLM's reply.
+#[derive(Clone)]
+pub struct ChatTurn {
+    pub is_user: bool,
+    pub text: String,
+}
+
+/// State of the derivation chat overlay (Phase A only — "拆" with LLM guidance).
+/// Closed = not active; Open = user can type; Pending = message sent, awaiting LLM.
+#[derive(PartialEq)]
+pub enum DeriveState {
+    Closed,
+    Open,
+    Pending,
+}
+
 pub struct CardView {
     pub dc: DeckCard,
     pub entry: DictEntry,
@@ -239,6 +255,14 @@ pub struct App {
     /// discards results whose gen != current, so a cancelled-then-reopened ask
     /// doesn't land a stale answer from the first (still-billing) worker.
     ask_gen: u64,
+    /// Multi-turn derivation chat state (Phase A "拆" with LLM guidance).
+    pub derive: DeriveState,
+    /// Conversation history for the current card's derivation chat.
+    pub derive_turns: Vec<ChatTurn>,
+    /// Receiver for derivation chat LLM responses (separate from ask_rx).
+    derive_rx: Option<std::sync::mpsc::Receiver<std::result::Result<String, String>>>,
+    /// Scroll offset for the derivation chat popup.
+    pub derive_scroll: usize,
     ds_base: String,
     ds_key: String,
     ds_chat_model: String,
@@ -289,6 +313,10 @@ impl App {
             ask: Ask::Idle,
             ask_rx: None,
             ask_gen: 0,
+            derive: DeriveState::Closed,
+            derive_turns: Vec::new(),
+            derive_rx: None,
+            derive_scroll: 0,
             ds_base: cfg.deepseek.base_url.clone(),
             ds_key: cfg.deepseek.api_key.clone(),
             ds_chat_model: cfg.deepseek.chat_model.clone(),
@@ -321,6 +349,10 @@ impl App {
         self.ask_scroll = 0;
         self.show_graph = false;
         self.graph_cursor = 0;
+        self.derive = DeriveState::Closed;
+        self.derive_turns.clear();
+        self.derive_rx = None;
+        self.derive_scroll = 0;
         // A new card is loading — prime the slide-in so it fades up rather than
         // jump-cutting. reset_motion users get None (no fade, instant).
         self.reveal_anim = None;
@@ -434,10 +466,15 @@ impl App {
                 self.ask_scroll = 0;
                 return Ok(());
             }
-            if matches!(self.ask, Ask::Answer(_)) {
+            if let Ask::Answer(text) = &self.ask {
                 match key.code {
                     KeyCode::Down | KeyCode::Right => {
-                        self.ask_scroll = self.ask_scroll.saturating_add(1);
+                        // Clamp so the user can't scroll past the content into blank.
+                        // The popup shows roughly 10 lines after borders/padding; the
+                        // raw line count overestimates visible lines (wrapping adds
+                        // more), so this is a safe upper bound.
+                        let max = text.lines().count().saturating_sub(10);
+                        self.ask_scroll = (self.ask_scroll + 1).min(max);
                         return Ok(());
                     }
                     KeyCode::Up | KeyCode::Left => {
@@ -476,6 +513,12 @@ impl App {
             self.cmdmenu.cursor = 0;
             return Ok(());
         }
+        // The derivation chat overlay — multi-turn LLM conversation for Phase A "拆".
+        // Sits below cmdmenu (Tab still works) but above the base card. When open or
+        // pending, printable chars build the chat input; Enter sends, Esc closes.
+        if self.derive != DeriveState::Closed {
+            return self.on_derive_key(key);
+        }
         // Clear any non-sticky toast on the next keypress — Error toasts stay until
         // an explicit Esc/Space so the user can read a failure message even if they
         // reflexively hit a no-op key (like 'z' at base) right after it appears.
@@ -485,9 +528,13 @@ impl App {
         ) {
             self.toast = None;
         }
-        // Any non-Esc key cancels the Esc-to-quit priming — stops a stale confirm
-        // window from quitting the session after the user moved on to grading another card.
-        self.esc_confirm = None;
+        // A non-Esc key cancels the Esc-to-quit priming. Esc itself is excluded so the
+        // two-press flow works: the first Esc primes at line ~541, the second Esc must
+        // still find that prime here to quit. Clearing unconditionally would re-prime on
+        // every press and trap the user mid-session.
+        if !matches!(key.code, KeyCode::Esc) {
+            self.esc_confirm = None;
+        }
 
         // ── 星火接线 sub-interaction — blocks grading until you resolve the recall ──
         let strike = self
@@ -591,52 +638,22 @@ impl App {
             }
         }
 
-        // Derive game: on a new word's prompt, type keys build your guess. All printable
-        // chars go into the input — command keys ('a'/'g'/'s'/'w'/'h'..'l'/'1'..'4') only
-        // fire after Enter reveals the card (see `command_eligible = revealed` below),
-        // so the learner can type any guess — "watch", "queue", "attract" — without a
-        // letter being swallowed by a command shortcut.
-        let in_derive = matches!(
+        // Command keys. `a` on a new word's Prompt opens the derivation chat (拆
+        // with LLM guidance); on Revealed or review cards it opens generic 辨析.
+        // The other commands (w/g/s/grade) require revealed.
+        let is_new_prompt = matches!(
             self.current.as_ref().map(|c| (c.is_new, c.stage)),
             Some((true, Stage::Prompt))
         );
-        if in_derive {
-            match key.code {
-                KeyCode::Backspace => {
-                    self.input.pop();
-                    return Ok(());
-                }
-                KeyCode::Char(c) if !c.is_control() => {
-                    self.input.push(c);
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
-
-        // Command keys — only when revealed (or done, where settings is still useful).
-        // In derive (Prompt) every letter went into the guess above, so these don't
-        // fire mid-derive; the learner must Enter-reveal first, then 'a' can critique
-        // their (now-frozen) guess against the truth.
-        let command_eligible = revealed;
         let done = self.done();
         match key.code {
-            KeyCode::Char('a') if command_eligible => {
-                // With a typed guess on a new word, 'a' critiques YOUR reasoning;
-                // otherwise it's a generic confusable 辨析.
-                let has_guess = self.current.as_ref().map(|c| c.is_new).unwrap_or(false)
-                    && !self.input.is_empty();
-                if has_guess {
-                    self.evaluate_guess();
-                } else {
-                    self.ask_socratic();
-                }
-            }
+            KeyCode::Char('a') if is_new_prompt => self.start_derive_chat(),
+            KeyCode::Char('a') if revealed || done => self.ask_socratic(),
             KeyCode::Char('w') if revealed => self.open_wiktionary(),
-            KeyCode::Char('g') if command_eligible => self.open_graph(),
+            KeyCode::Char('g') if revealed => self.open_graph(),
             // Settings is a runtime concern — reachable even after the session ends
             // (done state), so the learner can switch TTS engines without restarting.
-            KeyCode::Char('s') if command_eligible || done => self.open_settings(),
+            KeyCode::Char('s') if revealed || done => self.open_settings(),
             KeyCode::Char(c @ '1'..='4') if revealed => self.grade(c as u8 - b'0')?,
             // hjkl mirror the 1-4 grade keys (home-row hand position, Anki AJT style).
             // Explicit match — not a 'h'..='l' range, which would swallow 'i'.
@@ -649,6 +666,10 @@ impl App {
                     _ => 0,
                 })?;
             }
+            // Undo the last grade (3s window). Not gated on `revealed` because the
+            // new card after grading may still be in Prompt — undo must reach back
+            // across the card boundary regardless of the current card's stage.
+            KeyCode::Char('u') => return self.undo_grade(),
             _ => {}
         }
         Ok(())
@@ -714,10 +735,12 @@ impl App {
     fn fire_command(&mut self, label: &str) -> Result<()> {
         match label {
             "辨析" => {
-                let has_guess = self.current.as_ref().map(|c| c.is_new).unwrap_or(false)
-                    && !self.input.is_empty();
-                if has_guess {
-                    self.evaluate_guess();
+                let is_new_prompt = matches!(
+                    self.current.as_ref().map(|c| (c.is_new, c.stage)),
+                    Some((true, Stage::Prompt))
+                );
+                if is_new_prompt {
+                    self.start_derive_chat();
                 } else {
                     self.ask_socratic();
                 }
@@ -820,7 +843,10 @@ impl App {
         let (t, out) = (text.to_string(), path.clone());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut guard = server.lock().unwrap();
+            // Recover from a poisoned mutex (a prior worker panicked while holding
+            // the lock). The inner Option is still valid; we just take it as-is.
+            // Without this, a single worker panic permanently kills all TTS.
+            let mut guard = server.lock().unwrap_or_else(|e| e.into_inner());
             if guard.is_none() {
                 match tts::start_session(&tts) {
                     Ok(s) => *guard = Some(s),
@@ -861,14 +887,23 @@ impl App {
                     match crate::config::update_tts(kind.id(), &voice) {
                         Ok(()) => {
                             // Reload config + drop the warm session so next synth uses
-                            // the new engine.
-                            if let Ok(cfg) = Config::load() {
-                                self.tts = cfg.tts_engine();
+                            // the new engine. If the reload fails (brittle TOML
+                            // write/read), surface it — silently keeping the old engine
+                            // while the toast says "切换成功" would mislead the user.
+                            match Config::load() {
+                                Ok(cfg) => self.tts = cfg.tts_engine(),
+                                Err(e) => {
+                                    self.toast = Some(ToastMsg::error(format!(
+                                        "配置写入成功但重载失败: {e}"
+                                    )));
+                                    return Ok(());
+                                }
                             }
                             self.tts_server = Arc::new(Mutex::new(None));
-                            // Cancel any in-flight synth from the old engine — without
-                            // this, the old worker completes and plays the OLD voice
-                            // after the user already switched.
+                            // Drop the in-flight synth's receiver so the old worker's
+                            // result is discarded. The worker itself runs to completion
+                            // (sherpa's C++ call can't be interrupted), but its output
+                            // lands in the old engine's cache path and is never served.
                             self.tts_pending = None;
                             self.tts_rx = None;
                             self.settings.open = false;
@@ -888,7 +923,16 @@ impl App {
             KeyCode::Esc | KeyCode::Char('s') => {
                 self.settings.open = false;
             }
-            _ => {}
+            _ => {
+                if matches!(
+                    key.code,
+                    KeyCode::Char('1'..='4' | 'h' | 'j' | 'k' | 'l' | 'a' | 'w' | 'g' | 'u')
+                        | KeyCode::Enter
+                        | KeyCode::Tab
+                ) {
+                    self.toast = Some(ToastMsg::info("先 s/Esc 关闭设置"));
+                }
+            }
         }
         Ok(())
     }
@@ -968,6 +1012,7 @@ impl App {
 
     pub fn is_animating(&self) -> bool {
         matches!(self.ask, Ask::Pending)
+            || self.derive == DeriveState::Pending
             || self.tts_pending.is_some()
             || self
                 .strike_anim
@@ -1029,6 +1074,15 @@ impl App {
         let (rating, t) = self.grade_flash?;
         let p = t.elapsed().as_millis() as f64 / GRADE_FLASH_MS as f64;
         (p <= 1.0).then(|| (rating, p))
+    }
+
+    /// Whether a grade-undo is available right now (snapshot exists and within the
+    /// 3s window). Drives the cmdmenu row's enabled state — was previously gated on
+    /// `grade_flash()` (250ms), which made the 3s undo window unreachable.
+    pub fn can_undo(&self) -> bool {
+        self.undo_snap
+            .as_ref()
+            .is_some_and(|(_, t)| t.elapsed() <= Duration::from_secs(3))
     }
 
     /// Current Socratic-answer scroll offset (arrow keys in the Ask::Answer popup).
@@ -1192,14 +1246,31 @@ impl App {
 
     /// Send the learner's OWN derivation guess to DeepSeek for a Socratic critique of
     /// his reasoning — the guess becomes a live channel, not a dead echo.
-    fn evaluate_guess(&mut self) {
+    /// Open the derivation chat overlay for the current new word. Doesn't send a
+    /// message yet — the user types their guess and presses Enter to send. If no
+    /// DeepSeek key is configured, show the failure immediately.
+    fn start_derive_chat(&mut self) {
+        if self.ds_key.is_empty() {
+            self.toast = Some(ToastMsg::error(
+                "未配置 DeepSeek 密钥（~/.tuna/config.toml）",
+            ));
+            return;
+        }
+        self.input.clear();
+        self.derive_scroll = 0;
+        self.derive = DeriveState::Open;
+    }
+
+    /// Send the current input as a new message in the derivation chat. Spawns a
+    /// worker thread that calls the LLM with the full conversation history.
+    fn send_derive_msg(&mut self) {
+        let msg = self.input.trim().to_string();
+        if msg.is_empty() {
+            return;
+        }
         let Some(c) = self.current.as_ref() else {
             return;
         };
-        if self.ds_key.is_empty() {
-            self.ask = Ask::Failed("未配置 DeepSeek 密钥（~/.tuna/config.toml）".to_string());
-            return;
-        }
         let word = c.entry.word.clone();
         let morphemes = c
             .enrichment
@@ -1212,24 +1283,73 @@ impl App {
                     .join(" + ")
             })
             .unwrap_or_default();
-        let guess = self.input.clone();
+        // Stash the user message + history for the worker.
+        let history: Vec<(bool, String)> = self
+            .derive_turns
+            .iter()
+            .map(|t| (t.is_user, t.text.clone()))
+            .collect();
         let (base, key, model) = (
             self.ds_base.clone(),
             self.ds_key.clone(),
             self.ds_chat_model.clone(),
         );
-        self.ask_gen = self.ask_gen.wrapping_add(1);
-        let gen_id = self.ask_gen;
         let (tx, rx) = std::sync::mpsc::channel();
+        let send_msg = msg.clone();
         std::thread::spawn(move || {
             let client = DeepSeek::new(base, key);
-            let res =
-                crate::llm::socratic::evaluate_guess(&client, &model, &word, &morphemes, &guess)
-                    .map_err(|e| e.to_string());
-            let _ = tx.send((gen_id, res));
+            let res = crate::llm::socratic::derive_chat(
+                &client, &model, &word, &morphemes, &history, &send_msg,
+            )
+            .map_err(|e| e.to_string());
+            let _ = tx.send(res);
         });
-        self.ask_rx = Some(rx);
-        self.ask = Ask::Pending;
+        // Record the user's message immediately so it shows in the chat view.
+        self.derive_turns.push(ChatTurn {
+            is_user: true,
+            text: msg,
+        });
+        self.input.clear();
+        self.derive_rx = Some(rx);
+        self.derive = DeriveState::Pending;
+    }
+
+    /// Handle keys while the derivation chat overlay is open (or pending).
+    fn on_derive_key(&mut self, key: KeyEvent) -> Result<()> {
+        match (&self.derive, key.code) {
+            (DeriveState::Closed, _) => {}
+            (DeriveState::Pending, KeyCode::Esc) => {
+                self.derive = DeriveState::Closed;
+                self.derive_turns.clear();
+                self.derive_rx = None;
+            }
+            (DeriveState::Pending, _) => {
+                // Waiting for the LLM — only Esc works.
+            }
+            (DeriveState::Open, KeyCode::Esc) => {
+                self.derive = DeriveState::Closed;
+                self.derive_turns.clear();
+            }
+            (DeriveState::Open, KeyCode::Enter) => {
+                if !self.input.trim().is_empty() {
+                    self.send_derive_msg();
+                }
+            }
+            (DeriveState::Open, KeyCode::Backspace) => {
+                self.input.pop();
+            }
+            (DeriveState::Open, KeyCode::Up) => {
+                self.derive_scroll = self.derive_scroll.saturating_sub(1);
+            }
+            (DeriveState::Open, KeyCode::Down) => {
+                self.derive_scroll = self.derive_scroll.saturating_add(1);
+            }
+            (DeriveState::Open, KeyCode::Char(c)) if !c.is_control() => {
+                self.input.push(c);
+            }
+            (DeriveState::Open, _) => {}
+        }
+        Ok(())
     }
 
     /// Drain any completed background work (Socratic answer, on-demand synth).
@@ -1246,6 +1366,29 @@ impl App {
                     };
                 }
                 self.ask_rx = None;
+            }
+        }
+        // Derivation chat response — append the LLM reply to the conversation and
+        // reopen the input. If the user closed the chat while pending, discard.
+        if let Some(rx) = &self.derive_rx {
+            if let Ok(res) = rx.try_recv() {
+                if self.derive == DeriveState::Pending {
+                    match res {
+                        Ok(text) => {
+                            self.derive_turns.push(ChatTurn {
+                                is_user: false,
+                                text,
+                            });
+                            self.derive = DeriveState::Open;
+                        }
+                        Err(e) => {
+                            let first = e.lines().next().unwrap_or("请求失败");
+                            self.toast = Some(ToastMsg::error(format!("推导对话失败: {first}")));
+                            self.derive = DeriveState::Open;
+                        }
+                    }
+                }
+                self.derive_rx = None;
             }
         }
         if let Some(rx) = &self.tts_rx {
@@ -1358,6 +1501,13 @@ impl App {
         // row stays (it's append-only history) but the card state is restored, so
         // the next review uses the pre-grade stability/difficulty.
         self.deck.save_card(&dc.word, &dc.card, true)?;
+        // Decrement the session counter that grade() incremented, so the done
+        // screen and status bar stay accurate after an undo.
+        if !dc.introduced {
+            self.session_new = self.session_new.saturating_sub(1);
+        } else {
+            self.session_reviews = self.session_reviews.saturating_sub(1);
+        }
         // Move pos back to the undone card and reload it as current.
         self.pos = self.pos.saturating_sub(1);
         self.load_current()?;

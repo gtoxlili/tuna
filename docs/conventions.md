@@ -130,7 +130,7 @@
 
 ```toml
 opt-level = 3        # 最大运行时优化
-lto = "fat"          # 全程序 LTO(含 ort/ratatui/rusqlite)
+lto = "fat"          # 全程序 LTO(含 sherpa-onnx/ratatui/rusqlite)
 codegen-units = 1    # 单单元,优化器看到全部
 strip = "symbols"    # 去 symbol table + debuginfo
 panic = "unwind"     # 刻意保留:TUI 靠 unwinding 恢复终端;abort 会跳过 Drop 弄烂终端

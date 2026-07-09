@@ -13,7 +13,7 @@
 use std::ffi::c_void;
 use std::ptr;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use core_foundation::base::TCFType;
 use core_foundation::string::CFString;
 use coreaudio_sys::{
@@ -45,7 +45,7 @@ const TRANSPORT_BLUETOOTH: u32 = fourcc(b"blue");
 const TRANSPORT_BLUETOOTH_LE: u32 = fourcc(b"blea");
 const TRANSPORT_BUILTIN: u32 = fourcc(b"bltn");
 const TRANSPORT_USB: u32 = fourcc(b"usb ");
-const TRANSPORT_AGGREGATE: u32 = fourcc(b"grup");
+const TRANSPORT_AGGREGATE: u32 = fourcc(b"aggr");
 const TRANSPORT_VIRTUAL: u32 = fourcc(b"virt");
 const TRANSPORT_AIRPLAY: u32 = fourcc(b"airp");
 const TRANSPORT_HDMI: u32 = fourcc(b"hdmi");
