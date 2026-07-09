@@ -24,10 +24,10 @@
 ```bash
 brew tap gtoxlili/tuna
 brew trust gtoxlili/tuna
-brew install tuna
+brew install gtoxlili/tuna/tuna
 ```
 
-Homebrew 6.0 起第三方 tap 需要显式信任（`brew trust`）才会加载。如果你的 Homebrew 版本低于 6.0，`brew tap` 后直接 `brew install tuna` 即可。
+装出来的命令叫 `tuna`。注意必须用全限定名 `gtoxlili/tuna/tuna`：homebrew-core 里有一个同名的 cask（`tuna`，一个无关的 Mac 启动器），直接 `brew install tuna` 会装到那个 cask 上。Homebrew 6.0 起第三方 tap 需要显式信任（`brew trust`）才会加载；低于 6.0 的版本省略 `brew trust` 这一步。
 
 二进制覆盖 Apple Silicon（M1 及以上）和 Intel Mac。
 
