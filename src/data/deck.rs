@@ -520,15 +520,6 @@ impl Deck {
         Ok(())
     }
 
-    /// The top `limit` words by frequency (for pre-synthesizing audio, etc.).
-    pub fn top_words(&self, limit: usize) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT word FROM dict ORDER BY priority ASC LIMIT ?1")?;
-        let rows = stmt.query_map(params![limit as i64], |r| r.get::<_, String>(0))?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
     /// Words not yet enriched, in frequency order (so we spend LLM budget on the
     /// words you'll meet soonest).
     pub fn words_to_enrich(&self, limit: usize) -> Result<Vec<String>> {
@@ -901,12 +892,6 @@ impl Deck {
             |r| r.get(0),
         )?;
         Ok(n > 0)
-    }
-
-    pub fn enriched_count(&self) -> Result<i64> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM enrichment", [], |r| r.get(0))?)
     }
 
     /// Append a review-log entry.

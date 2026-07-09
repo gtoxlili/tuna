@@ -36,6 +36,9 @@ struct Cli {
 enum Cmd {
     /// Start a study session (default). First run initializes ~/.tuna.
     Study,
+    /// Re-run the setup wizard (rebind earphone, set key, download voice models).
+    /// Use this when you skipped model download on first run, or want to switch engines.
+    Setup,
     /// Socratic 辨析 of a word vs its confusables (needs a DeepSeek key).
     Ask { word: String },
     /// Deck statistics.
@@ -106,6 +109,7 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Probe) => probe(),
         Some(Cmd::GateTest { needle }) => gate_test(&needle),
+        Some(Cmd::Setup) => setup::run(),
         Some(Cmd::BuildDeck { ecdict, deck }) => build_deck(&ecdict, &deck),
         Some(Cmd::ExportDeck { deck, out }) => export_deck(&deck, &out),
         Some(Cmd::Enrich { deck, limit, word }) => enrich(&deck, limit, word),
@@ -189,6 +193,16 @@ fn bootstrap() -> Result<()> {
 fn ensure_ready() -> Result<()> {
     if !paths::is_initialized() {
         bootstrap()?;
+    } else {
+        // Config exists, but the deck might be empty (partial bootstrap, corrupted
+        // DB). Rebuild from the embedded asset so the user never lands on an empty
+        // screen with no recovery path.
+        let mut deck = Deck::open(&paths::deck_db())?;
+        if deck.stats()?.cards == 0 {
+            deck.build_from_asset(assets::DECK)?;
+            deck.load_enrichment_str(assets::ENRICHMENT)?;
+            deck.canonicalize_cognates()?;
+        }
     }
     Ok(())
 }

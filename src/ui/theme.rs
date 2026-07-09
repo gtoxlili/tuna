@@ -1,4 +1,4 @@
-//! The deep-water instrument palette, from the design brief.
+//! UI color palette: ink-black background with teal current and amber accents.
 
 use ratatui::style::Color;
 

@@ -13,13 +13,13 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 use crate::audio::player::{self, RoutedPlayer};
 use crate::audio::probe;
-use crate::audio::tts::{self, from_kind, SynthSession, TtsConfig, TtsEngineKind};
+use crate::audio::tts::{self, SynthSession, TtsConfig, TtsEngineKind, from_kind};
 use crate::config::Config;
 use crate::data::deck::{DeckCard, DictEntry, MorphemeGroup};
 use crate::data::scheduler::rating_from_u8;
 use crate::data::{Deck, Scheduler};
-use crate::llm::enrich::Enrichment;
 use crate::llm::DeepSeek;
+use crate::llm::enrich::Enrichment;
 use crate::paths;
 
 use super::cmdmenu::CommandMenu;
@@ -41,10 +41,10 @@ const GRADE_FLASH_MS: u128 = 250;
 const CARD_SLIDE_MS: u128 = 150;
 /// Morpheme stagger step on reveal — each cell lights up this many ms after the
 /// previous one, preserving the "taking it apart" feel of the derivation.
-const MORPHEME_STAGGER_MS: u128 = 60;
+pub const MORPHEME_STAGGER_MS: u128 = 60;
 /// Per-cell fade-in duration (starts at index × STAGGER). 120ms is one eye-fixation;
 /// shorter feels like a flicker, longer drags the reveal past the user's read.
-const MORPHEME_CELL_FADE_MS: u128 = 120;
+pub const MORPHEME_CELL_FADE_MS: u128 = 120;
 /// Window for the two-press Esc-to-quit confirmation (first Esc primes, second quits).
 const ESC_CONFIRM_MS: Duration = Duration::from_secs(2);
 
@@ -105,13 +105,25 @@ pub struct ToastMsg {
 
 impl ToastMsg {
     pub fn info(text: impl Into<String>) -> Self {
-        Self { text: text.into(), level: ToastLevel::Info, born: Instant::now() }
+        Self {
+            text: text.into(),
+            level: ToastLevel::Info,
+            born: Instant::now(),
+        }
     }
     pub fn warn(text: impl Into<String>) -> Self {
-        Self { text: text.into(), level: ToastLevel::Warn, born: Instant::now() }
+        Self {
+            text: text.into(),
+            level: ToastLevel::Warn,
+            born: Instant::now(),
+        }
     }
     pub fn error(text: impl Into<String>) -> Self {
-        Self { text: text.into(), level: ToastLevel::Error, born: Instant::now() }
+        Self {
+            text: text.into(),
+            level: ToastLevel::Error,
+            born: Instant::now(),
+        }
     }
     fn ttl(&self) -> Option<Duration> {
         match self.level {
@@ -312,7 +324,11 @@ impl App {
         // A new card is loading — prime the slide-in so it fades up rather than
         // jump-cutting. reset_motion users get None (no fade, instant).
         self.reveal_anim = None;
-        self.card_slide = if self.reduced_motion { None } else { Some(Instant::now()) };
+        self.card_slide = if self.reduced_motion {
+            None
+        } else {
+            Some(Instant::now())
+        };
         while self.pos < self.queue.len() {
             let dc = self.queue[self.pos].clone();
             if let Some(entry) = self.deck.entry(&dc.word)? {
@@ -382,10 +398,7 @@ impl App {
     /// reads as "the highlighted engine is the current one" even when it isn't.
     fn open_settings(&mut self) {
         let kinds = TtsEngineKind::all();
-        self.settings.cursor = kinds
-            .iter()
-            .position(|k| *k == self.tts.kind)
-            .unwrap_or(0);
+        self.settings.cursor = kinds.iter().position(|k| *k == self.tts.kind).unwrap_or(0);
         self.settings.open = true;
     }
 
@@ -437,9 +450,10 @@ impl App {
             // The overlay swallows keys that would otherwise grade or open other
             // overlays. Surface the swallow — a silent return makes the user think
             // the grade registered when it didn't.
-            if matches!(key.code,
+            if matches!(
+                key.code,
                 KeyCode::Char('1'..='4' | 'h' | 'j' | 'k' | 'l' | 'w' | 's' | 'g' | ' ')
-                | KeyCode::Enter
+                    | KeyCode::Enter
             ) {
                 self.toast = Some(ToastMsg::info("先 a/Esc 关闭辨析"));
             }
@@ -465,7 +479,10 @@ impl App {
         // Clear any non-sticky toast on the next keypress — Error toasts stay until
         // an explicit Esc/Space so the user can read a failure message even if they
         // reflexively hit a no-op key (like 'z' at base) right after it appears.
-        if !matches!(self.toast.as_ref().map(|t| t.level), Some(ToastLevel::Error)) {
+        if !matches!(
+            self.toast.as_ref().map(|t| t.level),
+            Some(ToastLevel::Error)
+        ) {
             self.toast = None;
         }
         // Any non-Esc key cancels the Esc-to-quit priming — stops a stale confirm
@@ -473,7 +490,11 @@ impl App {
         self.esc_confirm = None;
 
         // ── 星火接线 sub-interaction — blocks grading until you resolve the recall ──
-        let strike = self.current.as_ref().map(|c| c.strike).unwrap_or(Strike::Idle);
+        let strike = self
+            .current
+            .as_ref()
+            .map(|c| c.strike)
+            .unwrap_or(Strike::Idle);
         match (strike, key.code) {
             (Strike::Prompt, KeyCode::Char(' ')) => {
                 if let Some(c) = &mut self.current {
@@ -620,7 +641,13 @@ impl App {
             // hjkl mirror the 1-4 grade keys (home-row hand position, Anki AJT style).
             // Explicit match — not a 'h'..='l' range, which would swallow 'i'.
             KeyCode::Char(c) if revealed && matches!(c, 'h' | 'j' | 'k' | 'l') => {
-                self.grade(match c { 'h' => 1, 'j' => 2, 'k' => 3, 'l' => 4, _ => 0 })?;
+                self.grade(match c {
+                    'h' => 1,
+                    'j' => 2,
+                    'k' => 3,
+                    'l' => 4,
+                    _ => 0,
+                })?;
             }
             _ => {}
         }
@@ -784,7 +811,7 @@ impl App {
         }
         if !self.tts.models_present() {
             self.toast = Some(ToastMsg::error(
-                "发音模型未下载（退出后重跑 tuna 触发安装向导，或按 s 打开设置）",
+                "发音模型未下载（运行 tuna setup 下载，或按 s 打开设置）",
             ));
             return;
         }
@@ -845,9 +872,7 @@ impl App {
                             self.tts_pending = None;
                             self.tts_rx = None;
                             self.settings.open = false;
-                            self.toast = Some(ToastMsg::info(
-                                format!("✓ 切换到 {}", kind.id()),
-                            ));
+                            self.toast = Some(ToastMsg::info(format!("✓ 切换到 {}", kind.id())));
                         }
                         Err(e) => {
                             self.toast = Some(ToastMsg::error(format!("切换失败: {e}")));
@@ -855,7 +880,7 @@ impl App {
                     }
                 } else {
                     self.toast = Some(ToastMsg::error(format!(
-                        "{} 未下载，退出后重跑 tuna 触发安装向导获取",
+                        "{} 未下载，运行 tuna setup 下载",
                         kind.id()
                     )));
                 }
@@ -894,9 +919,10 @@ impl App {
             _ => {
                 // Surface swallowed grade/command keys — without this the user can't
                 // tell whether '3' graded the word or vanished into the overlay.
-                if matches!(key.code,
+                if matches!(
+                    key.code,
                     KeyCode::Char('1'..='4' | 'h' | 'j' | 'k' | 'l' | 'a' | 'w' | 's')
-                    | KeyCode::Enter
+                        | KeyCode::Enter
                 ) {
                     self.toast = Some(ToastMsg::info("先 g/Esc 关闭星座"));
                 }
@@ -1049,9 +1075,12 @@ impl App {
         let Some(anchor) = self.current.as_ref().and_then(|c| c.anchor.clone()) else {
             return Ok(());
         };
-        let info = self.scheduler.grade(anchor.card.clone(), rating, Utc::now());
+        let info = self
+            .scheduler
+            .grade(anchor.card.clone(), rating, Utc::now());
         self.deck.save_card(&anchor.word, &info.card, true)?;
-        self.deck.log_review(&anchor.word, rating, &info.review_log)?;
+        self.deck
+            .log_review(&anchor.word, rating, &info.review_log)?;
         if let Some(c) = &mut self.current {
             c.strike = Strike::Idle; // resolved — grading the new word is unblocked
         }
@@ -1059,12 +1088,18 @@ impl App {
             if !self.reduced_motion {
                 self.strike_anim = Some(Instant::now()); // fire the arc
             }
-            self.toast = Some(ToastMsg::info(format!("✦ 接线成功  {}  +1 复习", anchor.word)));
+            self.toast = Some(ToastMsg::info(format!(
+                "✦ 接线成功  {}  +1 复习",
+                anchor.word
+            )));
         } else {
             // Again/Hard on the anchor — the recall failed, so the OLD word lapses.
             // Symmetric to the Good message (✦ 成功 / ✗ 失败) and honest about the
             // lapse: this was a real FSRS review that counts as +1 lapse on anchor.
-            self.toast = Some(ToastMsg::info(format!("✗ 接线失败  {}  +1 lapse", anchor.word)));
+            self.toast = Some(ToastMsg::info(format!(
+                "✗ 接线失败  {}  +1 lapse",
+                anchor.word
+            )));
         }
         Ok(())
     }
@@ -1188,8 +1223,9 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let client = DeepSeek::new(base, key);
-            let res = crate::llm::socratic::evaluate_guess(&client, &model, &word, &morphemes, &guess)
-                .map_err(|e| e.to_string());
+            let res =
+                crate::llm::socratic::evaluate_guess(&client, &model, &word, &morphemes, &guess)
+                    .map_err(|e| e.to_string());
             let _ = tx.send((gen_id, res));
         });
         self.ask_rx = Some(rx);

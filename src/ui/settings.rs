@@ -78,7 +78,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
-        "未下载的引擎请退出后重跑 tuna 触发安装向导获取。",
+        "未下载的引擎请退出后运行 tuna setup 下载。",
         Style::default().fg(MUTED),
     )));
 

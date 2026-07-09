@@ -140,11 +140,7 @@ pub fn from_kind(kind: TtsEngineKind) -> Box<dyn TtsEngine> {
 /// the sherpa `OfflineTts` and is `Send`, so it can live in an `Arc<Mutex<Option<…>>>`
 /// on the UI thread and be locked from a worker thread for on-demand synth.
 pub fn start_session(cfg: &TtsConfig) -> Result<Box<dyn SynthSession>> {
-    match cfg.kind {
-        TtsEngineKind::Kokoro => session::SherpaSession::start(cfg),
-        TtsEngineKind::Matcha => session::SherpaSession::start(cfg),
-        TtsEngineKind::Piper => session::SherpaSession::start(cfg),
-    }
+    session::SherpaSession::start(cfg)
 }
 
 /// A warm synth engine: holds the sherpa `OfflineTts` and the voice list, and runs

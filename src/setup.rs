@@ -1,7 +1,5 @@
-//! First-run setup — a calm, three-step ritual: bind an earphone (the emotional
-//! center: silence is the default at the office), add a DeepSeek key, fetch the
-//! voice model. Styled in the deep-water palette; falls back to a template when
-//! stdin isn't a terminal (CI / piped).
+//! First-run setup: bind an earphone, add a DeepSeek key, fetch a voice model.
+//! Safe to re-run via `tuna setup` (existing values are pre-filled as defaults).
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -10,9 +8,10 @@ use anyhow::Result;
 
 use crate::audio::probe::{self, DeviceInfo};
 use crate::audio::tts::{from_kind, TtsEngineKind};
+use crate::config::Config;
 use crate::paths;
 
-// ── deep-water palette (ANSI truecolor) ──
+// ── palette (ANSI truecolor) ──
 const TEAL: (u8, u8, u8) = (52, 211, 194);
 const AMBER: (u8, u8, u8) = (236, 179, 94);
 const CORAL: (u8, u8, u8) = (237, 110, 92);
@@ -38,11 +37,16 @@ fn prompt(p: &str) -> String {
     readline()
 }
 
-/// Run the wizard, returning nothing — it writes ~/.tuna/config.toml directly.
+/// Run the wizard. Loads existing config (if any) so re-runs keep your key and
+/// earphone binding as defaults: just press Enter to keep each value.
 pub fn run() -> Result<()> {
-    banner();
-    let needle = step_earphone();
-    let key = step_key();
+    let existing = Config::load().ok();
+    let cur_needle = existing.as_ref().map(|c| c.gate.needle.as_str());
+    let cur_key = existing.as_ref().map(|c| c.deepseek.api_key.as_str());
+    let is_rerun = existing.is_some();
+    banner(is_rerun);
+    let needle = step_earphone(cur_needle);
+    let key = step_key(cur_key);
     let (engine, voice) = step_engine();
     init_config(&needle, &key, &engine, &voice)?;
     Ok(())
@@ -60,7 +64,7 @@ pub fn ready(words: usize, enriched: usize) {
     );
 }
 
-fn banner() {
+fn banner(is_rerun: bool) {
     println!();
     println!(
         "  {} {}   {}",
@@ -68,24 +72,24 @@ fn banner() {
         paint(TEAL, "·"),
         paint(MUTED, "词根推导终端")
     );
-    println!(
-        "  {}",
-        paint(MUTED, "词汇不是要存储的事实，是要推导的公式。")
-    );
-    println!("\n  {}\n", paint(MUTED, "首次运行 · 三步设置 ────────────────"));
+    if is_rerun {
+        println!("\n  {}\n", paint(MUTED, "设置向导 · 回车保留当前值 ────────"));
+    } else {
+        println!("\n  {}\n", paint(MUTED, "首次运行 · 三步设置 ────────"));
+    }
 }
 
-fn step_earphone() -> String {
+fn step_earphone(current: Option<&str>) -> String {
     println!("  {} {}", paint(TEAL, &bold("①")), bold("绑定耳机"));
-    println!(
-        "     {}",
-        paint(MUTED, "只有它连着时 tuna 才发声。办公室里，静默是默认。")
-    );
+    let cur = current.unwrap_or("");
+    let hint = if cur.is_empty() {
+        "只有它连着时 tuna 才发声。"
+    } else {
+        &format!("当前绑定「{cur}」，回车保留。")
+    };
+    println!("     {}", paint(MUTED, hint));
 
     let devices = probe::current_probe().enumerate().unwrap_or_default();
-    // macOS filters to bluetooth-class devices (AirPods HFP/A2DP duplicates need the
-    // filter). Linux/Windows can't see transport via cpal 0.17, so list every output
-    // device and let the user pick — with a warning that ALSA names can drift.
     let candidates: Vec<&DeviceInfo> = devices
         .iter()
         .filter(|d| d.is_output() && gate_candidate(d))
@@ -94,13 +98,14 @@ fn step_earphone() -> String {
     if candidates.is_empty() {
         println!(
             "     {}",
-            paint(MUTED, "（暂未检测到合适的输出设备——连上后重开也行，或先输入名字）")
+            paint(MUTED, "（暂未检测到合适的输出设备，连上后重开或先输入名字）")
         );
+        let default = if cur.is_empty() { "airpods" } else { cur };
         let s = prompt(&format!(
             "     {} ",
-            paint(TEAL, "▸ 耳机名字子串（回车用 airpods）:")
+            paint(TEAL, &format!("▸ 耳机名字子串（回车用 {default}）:"))
         ));
-        return if s.is_empty() { "airpods".to_string() } else { s };
+        return if s.is_empty() { default.to_string() } else { s };
     }
 
     println!("     {}", paint(MUTED, "选一副绑定:"));
@@ -111,19 +116,30 @@ fn step_earphone() -> String {
             paint(MUTED, "（非 macOS：ALSA/WASAPI 设备名可能随重启漂移，如绑定失效请重跑 setup）")
         );
     }
+    // Pre-select the candidate matching the current needle, if any.
+    let preselect = candidates
+        .iter()
+        .position(|d| cur.is_empty() || d.name.to_lowercase().contains(&cur.to_lowercase()))
+        .unwrap_or(0);
     for (i, d) in candidates.iter().enumerate() {
+        let marker = if i == preselect { " ← 当前" } else { "" };
         println!(
-            "       {}  {}",
+            "       {}  {}{}",
             paint(AMBER, &format!("{}", i + 1)),
-            paint(FOAM, &d.name)
+            paint(FOAM, &d.name),
+            paint(MUTED, marker)
         );
     }
+    let default_pick = (preselect + 1).to_string();
     let pick = prompt(&format!(
         "     {} ",
-        paint(TEAL, "▸ 输入编号（回车用 1）:")
+        paint(TEAL, &format!("▸ 输入编号（回车用 {default_pick}）:"))
     ));
-    let idx = pick.parse::<usize>().ok().filter(|n| *n >= 1 && *n <= candidates.len());
-    let chosen = &candidates[idx.map(|n| n - 1).unwrap_or(0)];
+    let idx = pick
+        .parse::<usize>()
+        .ok()
+        .filter(|n| *n >= 1 && *n <= candidates.len());
+    let chosen = &candidates[idx.map(|n| n - 1).unwrap_or(preselect)];
     println!(
         "     {} {}",
         paint(GREEN, "✓ 已绑定"),
@@ -147,22 +163,30 @@ fn gate_candidate(d: &DeviceInfo) -> bool {
     }
 }
 
-fn step_key() -> String {
+fn step_key(current: Option<&str>) -> String {
     println!("\n  {} {}", paint(TEAL, &bold("②")), bold("DeepSeek 密钥"));
-    println!(
-        "     {}",
-        paint(
-            MUTED,
-            "用于苏格拉底辨析与点评你的推理。学习本身离线可用——可留空、以后填。"
-        )
-    );
-    let key = prompt(&format!("     {} ", paint(TEAL, "▸ 粘贴密钥（回车跳过）:")));
+    let cur = current.unwrap_or("");
+    if cur.is_empty() {
+        println!(
+            "     {}",
+            paint(MUTED, "用于苏格拉底辨析。学习本身离线可用，可留空以后填。")
+        );
+    } else {
+        println!("     {}", paint(MUTED, "已设置，回车保留当前密钥。"));
+    }
+    let key = prompt(&format!("     {} ", paint(TEAL, "▸ 粘贴密钥（回车跳过/保留）:")));
     if key.is_empty() {
-        println!("     {}", paint(MUTED, "· 跳过——之后可在 ~/.tuna/config.toml 补上"));
+        if cur.is_empty() {
+            println!("     {}", paint(MUTED, "· 跳过，之后可在 ~/.tuna/config.toml 补上"));
+            String::new()
+        } else {
+            println!("     {}", paint(GREEN, "✓ 保留当前密钥"));
+            cur.to_string()
+        }
     } else {
         println!("     {}", paint(GREEN, "✓ 已记录"));
+        key
     }
-    key
 }
 
 /// The engine picker: list Kokoro/Matcha/Piper with footprints + blurbs, let the
@@ -172,7 +196,7 @@ fn step_engine() -> (String, String) {
     println!("\n  {} {}", paint(TEAL, &bold("③")), bold("发音引擎"));
     println!(
         "     {}",
-        paint(MUTED, "本地 TTS，三个引擎任选。下齐才进入学习——之后按 Space 即刻发声。")
+        paint(MUTED, "本地 TTS，三个引擎任选。下齐才进入学习，之后按 Space 即刻发声。")
     );
 
     let kinds = TtsEngineKind::all();
@@ -235,12 +259,12 @@ fn step_engine() -> (String, String) {
                     println!("\n     {}", paint(CORAL, &format!("· 下载失败：{e}")));
                     let again = prompt(&format!(
                         "     {} ",
-                        paint(TEAL, "▸ 重试？(y / 回车跳过，首次按 Space 时再下):")
+                        paint(TEAL, "▸ 重试？(y / 回车跳过，之后可重跑 tuna setup 补下):")
                     ));
                     if !again.eq_ignore_ascii_case("y") {
                         println!(
                             "     {}",
-                            paint(MUTED, "· 跳过——发音将在首次按 Space 时补下")
+                            paint(MUTED, "· 跳过，之后运行 tuna setup 补下")
                         );
                         return (chosen.id().to_string(), voice);
                     }
@@ -303,7 +327,7 @@ fn migrate_old_files() {
     println!("     {}", paint(GREEN, "✓ 旧文件已清理"));
 }
 
-/// Stream a URL to `dest` with a live, deep-water progress bar — pure Rust (reqwest),
+/// Stream a URL to `dest` with a live progress bar. Pure Rust (reqwest),
 /// no `curl` on the host. Writes to a `.part` file and renames on success so a killed
 /// download never leaves a half-file that looks complete.
 pub fn download_with_progress(url: &str, dest: &std::path::Path, label: &str) -> Result<()> {

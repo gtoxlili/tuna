@@ -8,19 +8,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, Ask, CardView, Stage, Strike};
+use super::app::{App, Ask, CardView, MORPHEME_CELL_FADE_MS, MORPHEME_STAGGER_MS, Stage, Strike};
 use super::settings;
 use super::theme::*;
 use crate::data::deck::parse_exchange;
 use crate::llm::enrich::Enrichment;
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-/// Stagger constants — kept in sync with app.rs so the render math lines up with the
-/// is_animating window there. (Re-declared here rather than imported to keep view.rs's
-/// animation math readable in one place.)
-const MORPHEME_STAGGER_MS: u128 = 60;
-const MORPHEME_CELL_FADE_MS: u128 = 120;
 
 /// Linear blend of two RGB colors. `t=0` → `a`, `t=1` → `b`. Used for fade-in math
 /// (card slide and morpheme stagger). Non-RGB colors return `b` as a no-op fallback.
@@ -382,7 +376,7 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
         // Prompt (review, or un-enriched new)
         (Stage::Prompt, _) => {
             let prompt = if c.is_new {
-                "新词——先在脑中猜/拆一下它的意思，再回车揭示"
+                "新词：先在脑中猜/拆一下它的意思，再回车揭示"
             } else {
                 "回忆它的意思，再回车揭示"
             };
@@ -987,10 +981,6 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
         ("⌫", "推导阶段删字"),
         ("?", "本帮助（Esc/? 关闭，其他键穿透到下层）"),
     ]));
-    lines.push(Line::from(Span::styled(
-        "interval 后缀：m=分钟 h=小时 d=天 — 如 10m = 10分钟后复习",
-        Style::default().fg(MUTED),
-    )));
 
     let popup = centered_rect(72, 78, area);
     frame.render_widget(Clear, popup);

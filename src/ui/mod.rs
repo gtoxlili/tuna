@@ -20,10 +20,10 @@ pub fn run(deck_path: &Path) -> Result<()> {
     let cfg = Config::load()?;
     let mut app = App::new(deck_path, &cfg)?;
 
-    // Guard: an unbuilt deck should point the user at `build-deck`, not show
-    // a hollow "session complete" screen.
+    // Guard: an unbuilt deck is a bug state (ensure_ready rebuilds from assets on
+    // every launch). If we get here, the embedded deck asset itself is empty.
     if app.deck.stats()?.cards == 0 {
-        println!("\n  牌组为空。先构建它：\n    cargo run -- build-deck\n");
+        println!("\n  牌组为空，内嵌词库可能损坏。请重新安装或到 GitHub 反馈。\n");
         return Ok(());
     }
 
