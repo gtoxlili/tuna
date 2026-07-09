@@ -11,7 +11,7 @@ use super::{Download, EngineFiles, Voice};
 
 pub struct MatchaEngine;
 
-pub const SUBDIR: &str = "matcha-en";
+pub const SUBDIR: &str = "matcha-icefall-en_US-ljspeech";
 const ACOUSTIC: &str = "model-steps-3.onnx";
 const VOCODER: &str = "hifigan_v2.onnx";
 const TOKENS: &str = "tokens.txt";
@@ -19,7 +19,7 @@ const ESPEAK: &str = "espeak-ng-data";
 const LEXICON: &str = "lexicon.txt";
 
 const TARBALL_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-matcha-en-matcha-ljspeech-en_US.tar.bz2";
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-en_US-ljspeech.tar.bz2";
 const VOCODER_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/hifigan_v2.onnx";
 const TARBALL_MB: usize = 220;
@@ -55,8 +55,8 @@ impl super::TtsEngine for MatchaEngine {
         vec![
             Download {
                 url: TARBALL_URL.into(),
-                label: "sherpa-onnx-matcha-en-matcha-ljspeech-en_US.tar.bz2".into(),
-                dest: PathBuf::from("sherpa-onnx-matcha-en-matcha-ljspeech-en_US.tar.bz2"),
+                label: "matcha-icefall-en_US-ljspeech.tar.bz2".into(),
+                dest: PathBuf::from("matcha-icefall-en_US-ljspeech.tar.bz2"),
             },
             Download {
                 url: VOCODER_URL.into(),

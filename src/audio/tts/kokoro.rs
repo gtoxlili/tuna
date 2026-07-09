@@ -19,7 +19,7 @@ const TOKENS: &str = "tokens.txt";
 const ESPEAK: &str = "espeak-ng-data";
 
 const TARBALL_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-kokoro-en-v0_19.tar.bz2";
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2";
 const TARBALL_MB: usize = 320;
 
 impl KokoroEngine {
@@ -56,8 +56,8 @@ impl super::TtsEngine for KokoroEngine {
     fn downloads(&self) -> Vec<Download> {
         vec![Download {
             url: TARBALL_URL.into(),
-            label: "sherpa-onnx-kokoro-en-v0_19.tar.bz2".into(),
-            dest: PathBuf::from("sherpa-onnx-kokoro-en-v0_19.tar.bz2"),
+            label: "kokoro-en-v0_19.tar.bz2".into(),
+            dest: PathBuf::from("kokoro-en-v0_19.tar.bz2"),
         }]
     }
 
