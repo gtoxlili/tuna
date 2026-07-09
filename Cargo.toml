@@ -2,6 +2,10 @@
 name = "tuna"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/gtoxlili/tuna"
+homepage = "https://github.com/gtoxlili/tuna"
+description = "终端里的考研英语词根推导学习工具"
 
 [dependencies]
 anyhow = "1.0.103"

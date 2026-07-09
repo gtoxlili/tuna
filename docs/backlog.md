@@ -7,12 +7,12 @@
 
 ### 基础里程碑(M0–M5)
 
-- **M0** 耳机门 + CoreAudio 枚举 ✓ —— `probe` / `gate-test` 真机验证通过(默认输出=扬声器时
+- **M0** 耳机门 + CoreAudio 枚举 ✓ `probe` / `gate-test` 真机验证通过(默认输出=扬声器时
   chime 只进 AirPods)。
 - **M1** 数据管线(ECDICT → 考研牌组 → FSRS/SQLite)✓
 - **M2** 复习循环 + Ratatui 界面(拆·联·验 + 耳机门指示 + FSRS 间隔预览)✓
 - **M3** DeepSeek 词条精加工(词素/推导链/诚实词源/例句)+ 词根图边 + 拆·联 界面 ✓
-- **M4** Kokoro TTS + 耳机门播放(`Space` 发音)✓ —— 后升级为 sherpa-onnx 多引擎单二进制
+- **M4** Kokoro TTS + 耳机门播放(`Space` 发音)✓ 后升级为 sherpa-onnx 多引擎单二进制
   (Kokoro/Matcha/Piper 统一 OfflineTts API,砍掉 Python/uv/espeak)。
 - **M5** 打磨:词根图谱浮现(「你学过 X,同根」)+ 苏格拉底辨析(`a`)✓
 
@@ -21,11 +21,11 @@
 - **P0** morpheme 节点脊柱 + 杀 `known_anchors` 锚点谎言 ✓
 - **P1a** Wiktionary 覆盖率镜子(grounded etymology pipeline)✓
 - **P1b** S4 关笼 LLM 烤制(canonical morpheme nodes + caged LLM narration)✓
-- **P1c** 位置感知聚类 id(保留连字符作位置编码)✓ —— `4518/4801` 词 grounded enrichment
+- **P1c** 位置感知聚类 id(保留连字符作位置编码)✓ `4518/4801` 词 grounded enrichment
 - **P2** 星火接线 earned-edge 引擎(回忆一个已学同根词,给它真 refresh)✓
 - **P3** guess-eval(你的推导猜测成为 live 苏格拉底通道)✓
 - **P4** 签名动画(earned-strike arc + 可点 Wiktionary 引文,`w`)✓
-- **首启向导** 三步(绑耳机/密钥/下模型,deep-water styled)✓
+- **首启向导** 三步(绑耳机/密钥/下模型)✓
 - **P5** 星座 root-family(`g`):同根已学词 + 只差一个词根的前沿暗星 ✓
 - **P6** 同源合并:Wiktionary 碎片折回最简词根(spect 家族 2→6 词),gloss-gated ✓
 - **P7** 纯 Rust 单二进制:sherpa-onnx 静态链接 C++ 库,多引擎统一 OfflineTts API,砍 Python/uv/espeak ✓
@@ -67,7 +67,7 @@
 ### sherpa 引擎音色 / 自然度
 
 三引擎音色特征各异,未 A/B 验证:Kokoro(风格向量 TTS,英文女声 af_heart)、Matcha(条件流匹配,
-LJSpeech 女声)、Piper(VITS 社区多音色,默认 Lessac 女声)。落在"发音"这个情感中心上,无耳朵替用户
+LJSpeech 女声)、Piper(VITS 社区多音色,默认 Lessac 女声)。发音是核心交互,无法替用户
 判断音质,需用户真机实听拍板选哪个引擎。可测的管线都健康(`tuna synth` 烟测通过,运行时按 `s`
 可热切换引擎重听对比)。
 

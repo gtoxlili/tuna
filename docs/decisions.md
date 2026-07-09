@@ -1,7 +1,7 @@
 # 决策与理由
 
 本文档记录 M0–M5 / P0–P7 每个里程碑的关键决策与**为什么这样不那样**。改一个已有设计前
-先读对应条目——很多看起来"可以更简单"的方案已经被否决过,理由在这里。
+先读对应条目，很多看起来"可以更简单"的方案已经被否决过,理由在这里。
 
 ## 跨里程碑的根本决策
 
@@ -28,10 +28,9 @@ ROI 最高;政治大纲每年 9 月才更新,7 月做政治词卡等于背要作
 
 这条 thesis 直接驱动了 P0–P3 的所有重构。
 
-### Mirror, not crutch(贯穿 LLM 触点)
+### LLM 只做镜子不做拐杖
 
-DeepSeek 只交出词素 + 你可能已掌握的锚点 + derive-it-yourself 谜题,**绝不交一段让你被动吸收的
-段落**。这个哲学同样支配产品对用户的说话方式。
+DeepSeek 只交出词素 + 你可能已掌握的锚点 + derive-it-yourself 谜题,**不交让你被动吸收的段落**。
 
 ### 设计评审团拒绝"85% rule"
 
@@ -43,8 +42,8 @@ root"。
 - **删直接 cpal 依赖,改用 `rodio::cpal` 重导出**:rodio 0.22 vendor 了 cpal 0.17.3,直接依赖
   cpal 0.18 会导致 `Device` 类型不匹配(E0308)。
 - **CoreAudio 用显式 fourcc 常量**:版本无关,不猜 `coreaudio-sys` 重导出哪些符号。
-- **耳机门是物理保证不是 if**:`RoutedPlayer` 把流开在绑定设备上,手里没有指向扬声器的流,
-  漏音在物理上不可能。fail-closed 静音,绝不回退扬声器。
+- **耳机门是物理保证不是 if**:`RoutedPlayer` 把流开在绑定设备上,不指向扬声器的流,
+  漏音在物理上不可能。fail-closed 静音,不回退扬声器。
 
 ## M1 — ECDICT → 考研牌组 + FSRS/SQLite
 
@@ -123,34 +122,33 @@ root"。
 - **缓存 resume 不优先 raw ety**:加 raw 存储后,合并 tie-break 只比 category GOOD,旧"好但无 raw"条目
   被优先保留 → 判 0 命中、从头重抓。修复:`rank(x) = (category in GOOD, has raw ety)`。
 
-## P2 — 星火接线挣得的边
+## P2 — 星火接线
 
 - **节点只在被回忆时愈合,绝不在被显示时愈合**:机器永远不替你画新词与已知之间的边,它揭示
   `action = act + -ion`,然后问"哪个已学的词带 `act`";你在脑中回忆、翻牌、y/n 记一次那个老词的真
-  FSRS refresh。"The edge you see is the one your mind just traversed."
+  FSRS refresh。
 - **Strike Prompt 阶段隐藏 siblings 列表**:防剧透回忆;只在 reveal 后弹 strike 提问。
 - **Strike 期间阻塞新词评分**:必须先解决回忆子交互,才能评新词。
 
 ## P3 — guess-eval 苏格拉底活镜子
 
-- **`a` 键点评用户推理而非泛型辨析**:把"用户猜的推导"变成活通道而非死回声;LLM 提引导性问题
-  让用户自纠,再确认,绝不直接给判决。
+- **`a` 键点评用户推理而非泛型辨析**:把用户猜的推导发给 DeepSeek 做苏格拉底式点评，LLM 提引导性问题
+  让用户自纠，不直接给判决。
 
-## P4 — earned-strike arc 签名动画
+## P4 — strike 动画
 
 - **不用 tachyonfx 做签名动画**:tachyonfx 0.19 钉 ratatui 0.29,项目用 0.30,版本冲突同 tui-big-text
   陷阱;用已有的 anim clock 自制轻量动画,零版本风险。
-- **`w` 键打开 Wiktionary**:"honesty as a keypress"——每个根的引用证据一键可达。
+- **`w` 键打开 Wiktionary**:每个根的引用证据一键可达。
 
 ## 首启向导
 
-- **首启向导 = 与"办公室静默"情感中心匹配的仪式感**,不是写空模板:三件事领着配好(绑耳机 /
-  DeepSeek 密钥 / 发音模型)。
+- **首启向导是三步交互**(绑耳机 / DeepSeek 密钥 / 发音模型)，不是写空模板。
 - **TTY 门用 `stdout.is_terminal()`(原 stdin)**:更可测,piped stdin 的 reads 仍能工作。
 
 ## P5 — 星座 root-family overlay
 
-- **只画真实存在的共享词素边,从不臆造**:四种 glow——`◉` teal=当前词,`✦` green=已学且 stability≥21d,
+- **只画真实存在的共享词素边,从不臆造**:四种 glow：`◉` teal=当前词,`✦` green=已学且 stability≥21d,
   `✦` amber=已学但尚新鲜,`·` muted=前沿暗星。
 - **suffix 过滤用闭集 stoplist 而非 hyphen 启发式**:bake 把同一后缀有时写成 `-ion` 有时写成 `ion`,
   hyphen 启发漏过;语法后缀是有限集。
@@ -163,13 +161,13 @@ root"。
 - **`bond` 提升为一等 schema 字段**:anchor/sibling/constellation 三处都要过滤语法后缀,复制过滤不
   集中;且合并后把 `ment` 规范化掉连字符会让 `best_anchor` 的 `kind_w`(原本靠 hyphen 区分 suffix
   0.35 / root 1.0)把后缀误升权到 root。集中字段杜绝该回归。
-- **strict-rank 父规则**:同源合并首版两个 bug——`spect` 与 `-spect` fold 相同留两 rival 根,且选了
+- **strict-rank 父规则**:同源合并首版两个 bug：`spect` 与 `-spect` fold 相同留两 rival 根,且选了
   带连字符的 `-spect` 当 canonical;`praesidēns→prae` 是 root→prefix 错并。修复:等长 fold 允许,
   cleanest surface 胜出,prefix 列入黑名单不得作 root。
 
 ## P7 — 纯 Rust 单二进制
 
-- **完全砍掉 Python/uv/espeak 而非保留可选 sidecar**:用户"选了最狠的路",整条 `文本→音素→token→
+- **完全砍掉 Python/uv/espeak 而非保留可选 sidecar**:用户选了纯 Rust 路径，整条 `文本→音素→token→
   ONNX→24kHz` 都进二进制,实现真正的单二进制自包含。
 - **TTS 选 sherpa-onnx(非 ort+misaki-rs 自组合)**:`sherpa-onnx` crate 静态链接 k2-fsa 维护的 C++ 库,
   一个 `OfflineTts` API 覆盖 Kokoro(风格向量)/ Matcha(条件流匹配)/ Piper(VITS 社区多音色)三引擎,
@@ -178,7 +176,7 @@ root"。
   build script 从 GitHub releases 拉预编译库;本地 TLS 故障可用 `SHERPA_ONNX_ARCHIVE_DIR` 指向缓存绕过。
  
 - **引擎描述符拆三个文件而非巨型 match**:`kokoro.rs`/`matcha.rs`/`piper.rs` 各自持有自己的 URL/voice/
-  footprint/files() 布局,`TtsEngine` trait 统一静态描述符接口——加新引擎只加一个文件 + enum 变体,
+  footprint/files() 布局,`TtsEngine` trait 统一静态描述符接口，加新引擎只加一个文件 + enum 变体,
   不动 session 合成逻辑。
 - **`gen` 是 Rust 2024 reserved keyword**:session 里 `GenerationConfig` 变量不能用 `gen`,改用 `gen_cfg`。
 - **初始化改为阻塞式模型下载 + 进度条**(而非异步等待):用户明确要"前置条件都做完之后我们再进入
@@ -207,10 +205,10 @@ macOS 专属架构,`coreaudio-sys` + `core-foundation` 是无条件依赖,Window
   MSVC-only / zig 不兼容问题消失。
 - **CoreAudio 依赖收进 `cfg(target_os="macos")` 门**:`Cargo.toml` 把 `coreaudio-sys` + `core-foundation`
   移到 `[target.'cfg(target_os = "macos")'.dependencies]`,Linux/Windows 构建不拉这俩。
-- **`trait AudioProbe` 抽象设备枚举**:`probe.rs` 按目标挑后端——macOS 走 CoreAudio HAL(UID + transport
+- **`trait AudioProbe` 抽象设备枚举**:`probe.rs` 按目标挑后端：macOS 走 CoreAudio HAL(UID + transport
   fourcc),Linux/Windows 走 cpal ALSA/WASAPI。无匹配目标 `compile_error!` 防漏。
 - **门语义降级而非放弃**:cpal 0.17 在 Linux/Windows 不暴露稳定 UID / transport fourcc,所以非 macOS
-  平台回退按显示名绑定(老实标 "可能随重启漂移,需重跑 setup 重绑"),但 **fail-closed 原则三平台一致**——
+  平台回退按显示名绑定(老实标 "可能随重启漂移,需重跑 setup 重绑"),但 **fail-closed 原则三平台一致**，
   绑定设备不在场照样零音频。这是用户明示同意的降级,不是偷偷回退扬声器。
 
 三平台 cfg 门 + cpal 后端 + 按名字绑定降级落地后,跨平台移植完成。
@@ -223,29 +221,29 @@ Zellij·atuin·gh-dash·btop·Anki AJT)后,做以下决策:
 
 - **Tab 命令菜单而非 which-key popup / `:` command palette**:用户明示"通过方向键等去进行交互"。
   which-key popup 仍字母驱动(Space+letter);`:` palette 6 个命令不需要 fuzzy 搜索。Tab 菜单是方向键
-  驱动——Tab 在终端稳定(不像 F1/Ctrl 在 tmux 下被吞),↑↓ 选、Enter 确认、字母直达(lazygit 模式,专家
+  驱动：Tab 在终端稳定(不像 F1/Ctrl 在 tmux 下被吞),↑↓ 选、Enter 确认、字母直达(lazygit 模式,专家
   零摩擦)、Esc/Tab 关。主路径不要求记忆 `a/g/s/w` 字母。
 - **overlay 用扁平 bool + 纪律修复,不重构为 `Vec<Overlay>` 栈**:用户已决策"Esc=退一层"语义,扁平 bool
   的拦截顺序(help → settings → ask → graph → cmdmenu → strike → base)已是栈。bug 在纪律(静默吞键 /
   help 任意键关),不在架构。
 - **方向键语义统一**:↑↓ = 纵向焦点移动(speak_cursor / 菜单选项 / 星座扁平 / 辨析滚动 / 引擎选择),
-  ←→ = 横向(星座组内)或静默 no-op(无列表状态)。4 键不做同件事——revealed 阶段 ←→ 曾镜像 ↑↓,是
+  ←→ = 横向(星座组内)或静默 no-op(无列表状态)。4 键不做同件事：revealed 阶段 ←→ 曾镜像 ↑↓,是
   语义噪声,改为静默 no-op 保留给未来横向用途。
 - **Esc 语义分层**:done 状态单按即退(无未保存状态,两按过度);base 两按确认(2s 窗口,防误退丢复习
-  状态);overlay 顶层退一层。**不**做 overlay 间 Tab 轮转——Esc 只退不进。
+  状态);overlay 顶层退一层。**不**做 overlay 间 Tab 轮转，Esc 只退不进。
 - **overlay 静默吞键改 toast**:ask/graph overlay 内按不可用键(1-4/a/w/s/hjkl)不再 `_ => {}` 静默吞,
-  toast "先 a/Esc 关闭辨析" 给明确反馈。silent swallow 是 bug——用户不知是否生效。
+  toast "先 a/Esc 关闭辨析" 给明确反馈。silent swallow 是 bug，用户不知是否生效。
 - **help dismiss 纪律**:help 开时只 Esc/? 关闭,其他键**穿透到 underlying overlay**(不 return,继续走
   on_key 剩余逻辑)。原 help 任意键关闭,用户想对 underlying overlay 操作被迫按两次。
 - **LLM generation 计数 + 120s 超时**:`ask_gen: u64` 计数,每次 `ask_socratic` 自增;worker 闭包捕获
   gen_id 通过 channel 发 `(gen_id, result)`;`poll_async` 校验 `gen_id == self.ask_gen` 才用结果。cancel
-  后旧线程仍跑 + 计费的问题消失——stale 结果被丢弃。`reqwest` client 加 120s timeout。
+  后旧线程仍跑 + 计费的问题消失，stale 结果被丢弃。`reqwest` client 加 120s timeout。
 - **grade_flash 是跨卡瞬态,不在 `load_current` 清**:grade() 设 grade_flash → pos+=1 → load_current 加载
   下一张;wash 携带到新卡前 ~250ms 作为"你按了哪个评分键"的反馈。A4 曾把它当 per-card 瞬态清掉,导致
-  flash 永不显示——改为只清 strike_anim/ask/graph 等 per-card 状态,grade_flash 自过期(poll_async D6
+  flash 永不显示，改为只清 strike_anim/ask/graph 等 per-card 状态,grade_flash 自过期(poll_async D6
   清理)+ undo_grade 显式清。
 - **动画预算 ≤4 类,全 ≤400ms,全受 `reduced_motion` 门控**:卡片淡入 150ms / morpheme 错峰 60ms×index
-  (每 cell 120ms fade)/ grade flash 250ms(从 350ms 缩)/ strike arc 400ms(从 900ms 缩——900ms 期间
+  (每 cell 120ms fade)/ grade flash 250ms(从 350ms 缩)/ strike arc 400ms(从 900ms 缩，900ms 期间
   非 reduced 用户看 arc、reduced 用户看 siblings,两群体首 900ms 内容不同)。spinner 也尊重
   reduced_motion(reduced 时静态 "○")。
 - **strike_anim 缩短 + siblings 总是渲染**:原 `else if` 在 arc 期间 siblings 消失(900ms 内容空洞);

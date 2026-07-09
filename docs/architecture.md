@@ -37,7 +37,7 @@ src/
 └── ui/
     ├── app.rs         App 状态机:Stage/Strike/Ask/Gate;on_key 事件路由;后台轮询
     ├── view.rs        纯渲染:render() + render_ask/constellation/strike 等子视图
-    ├── theme.rs       deep-water instrument 调色板(墨底/phosphor-teal/amber)
+    ├── theme.rs       调色板(墨底/phosphor-teal/amber)
     └── mod.rs         run()(同步事件循环)+ preview()(TestBackend 无 TTY 验证)
 ```
 
@@ -64,7 +64,7 @@ src/
 
 两个词同根 = 它们在 `word_morpheme` 里共享同一个 `morpheme_id`。`Deck::learned_siblings` /
 `anchor_candidates` / `constellation` 都走这个 JOIN,且都带 `m.bond = 1` 过滤(语法后缀不算
-推导之桥)。这是为什么 `edge` 表里没有 cognate 类型——它派生,不存储。
+推导之桥)。这是为什么 `edge` 表里没有 cognate 类型，它派生，不存储。
 
 `morpheme.bond` 是一等字段,因为 `canonicalize_cognates()` 会把 `-ment` 规范化成 `ment`,
 如果靠 hyphen 区分 suffix/root 会让后缀被静默升权到 root。集中字段杜绝该回归。
@@ -99,7 +99,7 @@ src/
 | `Space` | 发音(只走绑定耳机;未缓存则当场合成,首次含图优化 ~0.6s release) |
 | `↑↓` | 选读(揭示后切换朗读目标:单词本身 / 例句;wraparound) |
 | `a` | 苏格拉底辨析 / guess-eval(需 DeepSeek 密钥) |
-| `w` | 打开该词 Wiktionary 词源页("honesty as a keypress") |
+| `w` | 打开该词 Wiktionary 词源页 |
 | `g` | 星座:当前词的词根家族(同根已学词 + 只差一个词根的前沿暗星);overlay 内 `↑↓` 导航 `Space` 朗读 |
 | `s` | 设置:运行时切换 TTS 引擎 overlay(Kokoro/Matcha/Piper) |
 
@@ -114,6 +114,7 @@ src/
 | `tuna deck-info` | ✓ | 牌组统计 + 频率序队列 |
 | `tuna probe` | ✓ | 列 CoreAudio 设备(UID/transport/out-streams) |
 | `tuna gate-test [needle]` | ✓ | 测试音只走绑定耳机;不在场静默 |
+| `tuna setup` | ✓ | 重跑设置向导(重绑耳机/重设密钥/下模型) |
 | `tuna build-deck` | 隐藏 | 维护者:从 ECDICT 建开发库 |
 | `tuna export-deck` | 隐藏 | 维护者:导出 `assets/deck.jsonl` |
 | `tuna enrich` | 隐藏 | 维护者:DeepSeek 精加工进开发库 |
@@ -126,11 +127,11 @@ src/
 
 这几条是系统属性,改相关代码前必须守住(完整理由见 [conventions.md](./conventions.md)):
 
-- **耳机门是物理保证,不是 if 拦截**:`RoutedPlayer` 把流直接开在绑定的 cpal 设备上,手里没有指向
+- **耳机门是物理保证,不是 if 拦截**:`RoutedPlayer` 把流直接开在绑定的 cpal 设备上,不指向
   系统默认输出的流,所以漏音在物理上不可能。耳机不在场 → `find_output_device` 返回 `None` →
-  fail-closed 静音,绝不回退扬声器。绑定契约跨平台有差异:macOS 按设备 UID(跨重连稳定、内嵌 MAC,
+  fail-closed 静音,不回退扬声器。绑定契约跨平台有差异:macOS 按设备 UID(跨重连稳定、内嵌 MAC,
   解决 AirPods 同名输入/输出掷硬币问题);Linux/Windows 因 cpal 0.17 不暴露稳定 UID/transport,
-  回退按显示名绑定——setup 向导显式告警 ALSA/WASAPI 名字可能随重启漂移,需重跑 setup 重绑。
+  回退按显示名绑定，setup 向导显式告警 ALSA/WASAPI 名字可能随重启漂移,需重跑 setup 重绑。
 - **单二进制自包含**:`assets.rs` 把 4801 词词典(2.2M,`DECK`)+ 精加工(`ENRICHMENT`)`include_str!`
   进二进制;morpheme 脊柱在运行时从 enrichment 派生(`normalize_morpheme`),`assets/morphemes.jsonl`
   虽提交进仓库但不被加载(只作人类可审 spine)。TTS 模型(63–320MB,随引擎)首启向导同步下载 +
