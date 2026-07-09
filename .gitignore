@@ -1,6 +1,9 @@
 # Rust
 /target
 
+# Local sherpa-onnx build cache (bypasses build-script download; not portable)
+.sherpa-cache/
+
 # Local config & secrets (DeepSeek key, bound-device UID, etc.)
 /tuna.toml
 /config.local.toml
@@ -18,3 +21,8 @@
 # Python
 __pycache__/
 *.pyc
+
+# IDE working directories (local plans, session artifacts — not project content)
+.trae/
+.vscode/
+.idea/
