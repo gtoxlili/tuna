@@ -87,7 +87,7 @@ pub fn enrich_word(
     let user = format!("word: {word}\n请只输出 json。");
     // Polysemous words (state, government) produce long objects; give ample room
     // so the JSON never truncates mid-object.
-    let (content, usage) = client.chat_json(model, SYSTEM_PROMPT, &user, 3200)?;
+    let (content, usage) = client.chat_json(model, SYSTEM_PROMPT, &user, 8192)?;
     let enrichment: Enrichment = serde_json::from_str(&content)
         .with_context(|| format!("parsing enrichment JSON for '{word}': {content}"))?;
     Ok((enrichment, content, usage))

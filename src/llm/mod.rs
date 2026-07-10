@@ -128,10 +128,26 @@ impl DeepSeek {
         if !status.is_success() {
             bail!("DeepSeek error {status}: {body}");
         }
-        let content = body["choices"][0]["message"]["content"]
-            .as_str()
-            .context("DeepSeek response had no message content")?
-            .to_string();
+        let msg = &body["choices"][0]["message"];
+        let content = msg["content"].as_str().unwrap_or("").trim().to_string();
+        // Reasoning models put the chain-of-thought in `reasoning_content` and the
+        // answer in `content`. When max_tokens runs out mid-reasoning, `content`
+        // comes back EMPTY while the call still succeeds — surfaced as an error
+        // here, because an empty bubble in the chat reads as the reply having been
+        // swallowed. finish_reason tells the two cases apart.
+        if content.is_empty() {
+            let finish = body["choices"][0]["finish_reason"]
+                .as_str()
+                .unwrap_or("unknown");
+            let reasoned = msg["reasoning_content"]
+                .as_str()
+                .map(|r| !r.trim().is_empty())
+                .unwrap_or(false);
+            if reasoned || finish == "length" {
+                bail!("回答被截断：思维链耗尽了 max_tokens（finish_reason={finish}）");
+            }
+            bail!("模型返回了空内容（finish_reason={finish}）");
+        }
         Ok(content)
     }
 
@@ -177,6 +193,14 @@ impl DeepSeek {
             .as_str()
             .context("DeepSeek response had no message content")?
             .to_string();
+        // Same failure shape as chat_multi: a reasoning model that exhausts
+        // max_tokens mid-chain returns success with empty content.
+        if content.trim().is_empty() {
+            let finish = body["choices"][0]["finish_reason"]
+                .as_str()
+                .unwrap_or("unknown");
+            bail!("模型返回了空内容（finish_reason={finish}，可能是思维链耗尽 max_tokens）");
+        }
         let u = &body["usage"];
         let usage = Usage {
             prompt: u["prompt_tokens"].as_u64().unwrap_or(0),

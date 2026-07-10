@@ -15,7 +15,7 @@ pub const SOCRATIC_SYSTEM: &str = "你是考研词汇导师。学习者想弄清
 /// Ask for a Socratic contrast of `word` given some context (its confusables + gloss).
 pub fn socratic(client: &DeepSeek, model: &str, word: &str, context: &str) -> Result<String> {
     let user = format!("目标词: {word}\n{context}\n请引导我分辨它和易混词。");
-    let (text, _usage) = client.chat_text(model, SOCRATIC_SYSTEM, &user, 900)?;
+    let (text, _usage) = client.chat_text(model, SOCRATIC_SYSTEM, &user, 8192)?;
     Ok(text.trim().to_string())
 }
 
@@ -60,7 +60,11 @@ pub fn derive_chat(
         messages.push((if *is_user { "user" } else { "assistant" }, text.clone()));
     }
     messages.push(("user", new_message.to_string()));
-    let text = client.chat_multi(model, messages, 500)?;
+    // Deliberately roomy: reasoning models spend their chain-of-thought from the
+    // same max_tokens budget, and a tight cap gets fully consumed by the thinking
+    // — the answer comes back empty. The replies themselves stay short (the
+    // system prompt asks for it); the budget is for the chain.
+    let text = client.chat_multi(model, messages, 8192)?;
     Ok(text.trim().to_string())
 }
 
@@ -90,6 +94,10 @@ pub fn compare_chat(
     if !new_message.is_empty() {
         messages.push(("user", new_message.to_string()));
     }
-    let text = client.chat_multi(model, messages, 500)?;
+    // Deliberately roomy: reasoning models spend their chain-of-thought from the
+    // same max_tokens budget, and a tight cap gets fully consumed by the thinking
+    // — the answer comes back empty. The replies themselves stay short (the
+    // system prompt asks for it); the budget is for the chain.
+    let text = client.chat_multi(model, messages, 8192)?;
     Ok(text.trim().to_string())
 }

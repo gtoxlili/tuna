@@ -256,7 +256,19 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
                 "✦  ",
                 Style::default().fg(AMBER),
             )]));
-            lines.extend(md.lines);
+            if md.lines.is_empty() && !turn.text.trim().is_empty() {
+                // The markdown parser produced nothing for non-empty text (e.g. a
+                // construct the parser build doesn't support) — show the raw text
+                // rather than an empty bubble.
+                for raw in turn.text.lines() {
+                    lines.push(Line::from(Span::styled(
+                        raw.to_string(),
+                        Style::default().fg(FOAM),
+                    )));
+                }
+            } else {
+                lines.extend(md.lines);
+            }
         }
         lines.push(Line::raw(""));
     }
