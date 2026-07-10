@@ -4,12 +4,12 @@ name: release
 # publish a GitHub Release with build-provenance attestations, and notify the
 # homebrew-tuna tap so its formula updates immediately (event-driven, no cron lag).
 #
-# THE RELEASE DECISION IS THE VERSION BUMP: Cargo.toml's `version` is the single
-# source of truth. Bump it (and let `cargo build` refresh Cargo.lock) in the
-# commit you consider release-worthy — that push is the only thing that builds.
-# Ordinary code pushes don't start a single runner (the paths filter below only
-# watches Cargo.toml and this file). The `version` job tags v<version> at HEAD;
-# a push where the version already has a tag no-ops in seconds.
+# AUTO-VERSIONED: every push to main that touches build inputs cuts a release.
+# major.minor comes from Cargo.toml's `version` (bump it there to move to 0.3);
+# patch is a monotone commit-count over the build-input paths, so the tag needs
+# no manual step. Doc-only pushes neither trigger nor inflate the version. A
+# push that resolves to an already-released tag (e.g. workflow-file-only churn)
+# hard-stops instead of rebuilding — published artifacts are never clobbered.
 #
 # The tag is pushed with the default GITHUB_TOKEN — nothing listens for tags as a
 # workflow trigger, so no PAT is needed for tagging. Notifying the tap DOES need
@@ -27,7 +27,11 @@ on:
   push:
     branches: [main]
     paths:
+      - 'src/**'
       - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'assets/**'
       - '.github/workflows/release.yml'
   workflow_dispatch:
 
@@ -54,36 +58,45 @@ jobs:
       proceed: ${{ steps.gate.outputs.proceed }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the patch number is a commit-count over build inputs.
+          fetch-depth: 0
 
-      - name: Gate on Cargo.toml version
+      - name: Resolve auto version
         id: gate
         shell: bash
         run: |
           set -euo pipefail
+          # major.minor from Cargo.toml (edit it there to bump); patch = monotone
+          # commit-count over the same build-input paths as the trigger.
           VER=$(sed -nE 's/^version *= *"([^"]+)".*/\1/p' Cargo.toml | head -n1)
           [ -n "$VER" ] || { echo "::error::no version in Cargo.toml"; exit 1; }
-          TAG="v${VER}"
+          MAJOR_MINOR=$(echo "$VER" | cut -d. -f1-2)
+          COUNT=$(git rev-list --count HEAD -- src Cargo.toml Cargo.lock .cargo assets)
+          TAG="v${MAJOR_MINOR}.${COUNT}"
+          echo "Resolved tag: ${TAG}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-          # Fail fast if Cargo.lock wasn't refreshed after the bump — the builds
-          # run with --locked and would otherwise fail 10 minutes later.
+          # Fail fast if Cargo.lock disagrees with Cargo.toml about tuna's own
+          # version — the builds run with --locked and would fail 10 minutes later.
           if ! grep -A1 '^name = "tuna"$' Cargo.lock | grep -q "^version = \"${VER}\""; then
-              echo "::error::Cargo.lock still has the old tuna version — run 'cargo build' after bumping Cargo.toml and commit the lockfile"
+              echo "::error::Cargo.lock has a different tuna version — run 'cargo build' after editing Cargo.toml's version and commit the lockfile"
               exit 1
           fi
 
           EXISTING=$(git ls-remote --tags origin "refs/tags/${TAG}^{}" "refs/tags/${TAG}" | awk '{print $1}' | tail -n1 || true)
           if [ -n "$EXISTING" ]; then
               # Same commit ⇒ idempotent re-run (a failed build can be retried).
-              # Different commit ⇒ this push didn't bump the version: no-op.
-              # Rebuilding an existing version from a newer commit would clobber
-              # published artifacts and break every formula sha256 pinning them.
+              # Different commit ⇒ this push didn't change the resolved version
+              # (e.g. workflow-file-only churn): no-op. Rebuilding an existing
+              # version from a newer commit would clobber published artifacts and
+              # break every formula sha256 pinning them.
               if [ "$EXISTING" = "$GITHUB_SHA" ]; then
                   echo "::notice::tag ${TAG} already at this commit; re-run, proceeding"
                   echo "proceed=true" >> "$GITHUB_OUTPUT"
               else
-                  echo "::notice::${TAG} already released from another commit — bump [package].version in Cargo.toml to cut a release"
+                  echo "::notice::${TAG} already released from another commit; nothing new to release"
                   echo "proceed=false" >> "$GITHUB_OUTPUT"
               fi
               exit 0
@@ -169,6 +182,9 @@ jobs:
       - name: build release
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
+          # Compiled into `tuna --version` (main.rs option_env!) so the binary
+          # reports the auto-resolved tag, not Cargo.toml's major.minor placeholder.
+          TUNA_VERSION: ${{ needs.version.outputs.version }}
         run: cargo build --release --target ${{ matrix.target }} --locked
 
       # Package the binary flat (at the archive root) — Homebrew's `bin.install`

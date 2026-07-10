@@ -24,8 +24,16 @@ use audio::player::{self, RoutedPlayer};
 use audio::probe;
 use data::Deck;
 
+/// Release builds inject the auto-resolved tag (e.g. "0.2.35") via `TUNA_VERSION`
+/// at compile time, so `tuna --version` matches the GitHub/Homebrew version —
+/// Cargo.toml only carries the major.minor base. Dev builds fall back to it.
+const VERSION: &str = match option_env!("TUNA_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 #[derive(Parser)]
-#[command(name = "tuna", version, about = "考研英语 · 词根推导终端")]
+#[command(name = "tuna", version = VERSION, about = "考研英语 · 词根推导终端")]
 struct Cli {
     /// No subcommand starts a study session; first run bootstraps ~/.tuna.
     #[command(subcommand)]

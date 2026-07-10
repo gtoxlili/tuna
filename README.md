@@ -89,7 +89,7 @@ uv run scripts/narrate.py  # 词根聚类 + 受控 LLM → assets/{morphemes,enr
 
 精加工是离线烤制、结果提交进仓库，用户零 LLM 成本。`bake.py` 抓 Wiktionary 模板做确定性词源解析，`narrate.py` 只让 LLM 翻译和串词已经验证的词素，禁止编造词根。
 
-发版：把 `Cargo.toml` 的 `version` 升一号，跑一次 `cargo build` 让 `Cargo.lock` 跟上，推到 main。只有这样的推送才会触发四平台构建和 GitHub Release，发布完成后自动通知 homebrew-tuna 更新 formula；普通代码推送不占用任何 CI。
+发版全自动：推送到 main 且触及构建输入（src、Cargo.toml/lock、assets 等）就会自动打 tag（major.minor 取自 `Cargo.toml`，patch 为提交计数）、构建四平台、发 GitHub Release，并通知 homebrew-tuna 立即更新 formula。想升大版本就改 `Cargo.toml` 的 `version` 前两位；纯文档推送不触发。
 
 ## 许可
 
