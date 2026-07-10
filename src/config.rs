@@ -39,6 +39,9 @@ pub struct TtsCfg {
     pub engine: String,
     pub voice: String,
     pub speed: f32,
+    /// Whether AI chat replies are spoken aloud (needs the zh+en chat voice model;
+    /// toggled with Tab inside the chat overlay).
+    pub chat_speak: bool,
 }
 
 /// Accessibility preferences. `reduced_motion` skips all animation (strike arc,
@@ -77,6 +80,7 @@ impl Default for TtsCfg {
             // anyway, so the honest default is the real sid-0 name.
             voice: "af".to_string(),
             speed: 1.0,
+            chat_speak: false,
         }
     }
 }
@@ -158,6 +162,52 @@ pub fn update_tts(engine: &str, voice: &str) -> Result<()> {
     Ok(())
 }
 
+/// Persist the chat-speak toggle into config.toml's `[tts]` section in place,
+/// preserving comments and other keys. Tolerant of configs written before the key
+/// existed: a missing `chat_speak` line is inserted at the end of the section.
+pub fn update_chat_speak(on: bool) -> Result<()> {
+    let path = paths::config_file();
+    let content = std::fs::read_to_string(&path)?;
+    let line_val = format!("chat_speak = {on}\n");
+    let mut in_tts = false;
+    let mut replaced = false;
+    let mut out = String::with_capacity(content.len() + line_val.len());
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            // Leaving [tts] without having seen the key — insert it before the
+            // next section header.
+            if in_tts && !replaced {
+                out.push_str(&line_val);
+                replaced = true;
+            }
+            in_tts = line.trim() == "[tts]";
+        }
+        let is_key = in_tts
+            && !trimmed.starts_with('#')
+            && trimmed
+                .split_once('=')
+                .map(|(k, _)| k.trim() == "chat_speak")
+                .unwrap_or(false);
+        if is_key {
+            out.push_str(&line_val);
+            replaced = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if in_tts && !replaced {
+        out.push_str(&line_val);
+        replaced = true;
+    }
+    if !replaced {
+        bail!("config.toml has no [tts] section");
+    }
+    std::fs::write(&path, out)?;
+    Ok(())
+}
+
 /// The config.toml written on first run.
 pub const TEMPLATE: &str = r#"# tuna 配置 · ~/.tuna/config.toml
 # DeepSeek 密钥用于词条精加工与苏格拉底辨析;学习本身离线可用,无需密钥。
@@ -180,6 +230,8 @@ needle = "airpods"
 engine = "kokoro"
 voice = "af"
 speed = 1.0
+# AI 对话回复是否朗读(需要中文语音模型,聊天框内 Tab 切换)
+chat_speak = false
 
 [a11y]
 # reduced_motion = true 时跳过所有动画(星火接线弧光/评分反馈/卡片切换/morpheme 错峰)

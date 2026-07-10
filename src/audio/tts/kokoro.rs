@@ -33,7 +33,9 @@ impl KokoroEngine {
             data_dir: root.join(ESPEAK),
             voices: Some(root.join(VOICES)),
             vocoder: None,
-            lexicon: None,
+            lexicons: Vec::new(),
+            rule_fsts: Vec::new(),
+            dict_dir: None,
         }
     }
 }

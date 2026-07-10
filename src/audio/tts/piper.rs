@@ -29,7 +29,9 @@ impl PiperEngine {
             data_dir: root.join(ESPEAK),
             voices: None,
             vocoder: None,
-            lexicon: None,
+            lexicons: Vec::new(),
+            rule_fsts: Vec::new(),
+            dict_dir: None,
         }
     }
 }

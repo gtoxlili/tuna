@@ -36,7 +36,9 @@ impl MatchaEngine {
             // espeak-ng-data. Passing a lexicon path here makes sherpa's Validate()
             // fail ("lexicon does not exist") and create() return None: Matcha would
             // be dead on arrival despite a clean install.
-            lexicon: None,
+            lexicons: Vec::new(),
+            rule_fsts: Vec::new(),
+            dict_dir: None,
         }
     }
 }

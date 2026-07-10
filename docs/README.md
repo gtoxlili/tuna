@@ -21,7 +21,7 @@
 
 - **是什么**:终端里的考研英语词根推导学习工具。方法论「拆·联·验」(Decompose · Link · Retrieve)+ FSRS 间隔重复。
 - **技术栈**:纯 Rust 单二进制 · Ratatui(TUI)· cpal/rodio(音频,跨平台 macOS/Linux/Windows)· rusqlite · rs-fsrs · sherpa-onnx(Kokoro/Matcha/Piper 多引擎本地 TTS)· DeepSeek(辨析)· ECDICT(离线词典,内嵌)。
-- **运行**:`cargo run --` 或 `cargo install --path . && tuna`。首次运行三步向导(绑耳机 / 密钥 / 下模型),之后学习离线可用。
+- **运行**:`cargo run --` 或 `cargo install --path . && tuna`。首次运行四步向导(绑耳机 / 密钥 / 下模型 / 可选对话语音),之后学习离线可用。
 - **数据根**:`~/.tuna/`(`config.toml` / `tuna.db` / `cache/audio/` / `tts/`),`$TUNA_HOME` 可覆盖(测试用)。
 
 ## 关键不变式(改代码前必读)

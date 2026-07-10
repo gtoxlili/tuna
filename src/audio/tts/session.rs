@@ -15,7 +15,7 @@ use sherpa_onnx::{
     OfflineTtsMatchaModelConfig, OfflineTtsModelConfig, OfflineTtsVitsModelConfig,
 };
 
-use super::{SynthSession, TtsConfig, TtsEngineKind, Voice, kokoro, matcha, piper};
+use super::{SynthSession, TtsConfig, TtsEngineKind, Voice, kokoro, kokoro_zh, matcha, piper};
 
 pub struct SherpaSession {
     tts: OfflineTts,
@@ -30,11 +30,16 @@ impl SherpaSession {
             TtsEngineKind::Kokoro => kokoro::KokoroEngine::files(&cfg.engine_dir),
             TtsEngineKind::Matcha => matcha::MatchaEngine::files(&cfg.engine_dir),
             TtsEngineKind::Piper => piper::PiperEngine::files(&cfg.engine_dir),
+            TtsEngineKind::KokoroZh => kokoro_zh::KokoroZhEngine::files(&cfg.engine_dir),
         };
         let voices = super::from_kind(cfg.kind).voices();
         let model_config = build_model_config(cfg.kind, &files);
+        // Text-normalization FSTs are a top-level OfflineTtsConfig concern (the
+        // zh chat voice normalizes dates/numbers into Chinese words with them).
+        let rule_fsts = join_paths(&files.rule_fsts);
         let config = OfflineTtsConfig {
             model: model_config,
+            rule_fsts,
             ..Default::default()
         };
         let tts = OfflineTts::create(&config)
@@ -76,17 +81,37 @@ impl SynthSession for SherpaSession {
     }
 }
 
+/// Comma-join a path list into sherpa's one-string list convention, or None when
+/// the engine carries none.
+fn join_paths(paths: &[std::path::PathBuf]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    Some(
+        paths
+            .iter()
+            .map(|p| p.to_str().expect("path not UTF-8").to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
 /// Translate the engine's file layout into sherpa's nested config, filling only the
 /// arm for the chosen engine and leaving the rest at default.
 fn build_model_config(kind: TtsEngineKind, f: &super::EngineFiles) -> OfflineTtsModelConfig {
     let path_str = |p: &Path| p.to_str().expect("path not UTF-8").to_string();
     match kind {
-        TtsEngineKind::Kokoro => OfflineTtsModelConfig {
+        // Both Kokoro exports share the config shape; the zh+en one adds the
+        // comma-joined en+zh lexicons (espeak-ng-data covers OOV English G2P) and
+        // the jieba dict_dir for Chinese segmentation.
+        TtsEngineKind::Kokoro | TtsEngineKind::KokoroZh => OfflineTtsModelConfig {
             kokoro: OfflineTtsKokoroModelConfig {
                 model: Some(path_str(&f.model)),
                 voices: f.voices.as_ref().map(|p| path_str(p)),
                 tokens: Some(path_str(&f.tokens)),
                 data_dir: Some(path_str(&f.data_dir)),
+                lexicon: join_paths(&f.lexicons),
+                dict_dir: f.dict_dir.as_ref().map(|p| path_str(p)),
                 ..Default::default()
             },
             num_threads: 1,
@@ -98,7 +123,7 @@ fn build_model_config(kind: TtsEngineKind, f: &super::EngineFiles) -> OfflineTts
                 vocoder: f.vocoder.as_ref().map(|p| path_str(p)),
                 tokens: Some(path_str(&f.tokens)),
                 data_dir: Some(path_str(&f.data_dir)),
-                lexicon: f.lexicon.as_ref().map(|p| path_str(p)),
+                lexicon: join_paths(&f.lexicons),
                 ..Default::default()
             },
             num_threads: 1,

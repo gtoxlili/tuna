@@ -52,11 +52,11 @@ impl CommandMenu {
             .unwrap_or((false, false));
         vec![
             CommandItem {
-                label: "辨析",
+                label: "对话",
                 hint: if is_new_prompt {
                     "和 AI 一起推导这个词"
                 } else if revealed {
-                    "苏格拉底辨析（易混词对照）"
+                    "和 AI 分清易混词（多轮对话）"
                 } else {
                     "揭示后可用"
                 },

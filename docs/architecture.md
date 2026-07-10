@@ -12,7 +12,7 @@ src/
 ├── paths.rs           ~/.tuna 路径解析($TUNA_HOME 覆盖);所有文件位置的单一来源
 ├── config.rs          ~/.tuna/config.toml 读写;DEEPSEEK_API_KEY 环境覆盖
 ├── assets.rs          include_str!/include_bytes! 把 deck/enrichment 资产编进二进制
-├── setup.rs           首启三步向导(绑耳机/密钥/下模型)+ 阻塞式带进度条下载
+├── setup.rs           首启四步向导(绑耳机/密钥/下模型/可选对话语音)+ 阻塞式带进度条下载
 ├── audio/
 │   ├── probe.rs       trait AudioProbe 跨平台抽象;macOS 走 CoreAudio,Linux/Windows 走 cpal
 │   ├── coreaudio.rs   CoreAudio HAL 枚举(UID/transport/out-streams);cfg(target_os="macos") 门
@@ -21,6 +21,7 @@ src/
 │   │   ├── mod.rs     TtsEngineKind / TtsEngine trait(静态描述符)/ TtsConfig / SynthSession trait
 │   │   ├── session.rs SherpaSession:暖推理 OfflineTts 实例,gen 保留字避开用 gen_cfg
 │   │   ├── kokoro.rs  Kokoro 引擎描述符(风格向量 TTS,sid 选音色)
+│   │   ├── kokoro_zh.rs Kokoro 多语(zh+en)描述符:AI 对话朗读用,不进学习引擎列表
 │   │   ├── matcha.rs  Matcha 引擎描述符(条件流匹配 + HiFiGAN vocoder)
 │   │   └── piper.rs   Piper 引擎描述符(VITS 社区多音色)
 │   └── mod.rs
@@ -32,11 +33,11 @@ src/
 ├── llm/
 │   ├── mod.rs         DeepSeek OpenAI 兼容 blocking 客户端;chat_json / chat_text
 │   ├── enrich.rs      词条精加工 schema(Enrichment/Morpheme/GraphEdge/Example)+ enrich_word
-│   ├── socratic.rs    苏格拉底辨析 + 多轮推导对话(derive_chat,引导不给答案)
+│   ├── socratic.rs    AI 对话两模式(derive_chat/compare_chat)+ CLI 一次性辨析
 │   └── mod.rs
 └── ui/
-    ├── app.rs         App 状态机:Stage/Strike/Ask/Gate;on_key 事件路由;后台轮询
-    ├── view.rs        纯渲染:render() + render_ask/constellation/strike 等子视图
+    ├── app.rs         App 状态机:Stage/Strike/Chat/Gate;on_key 事件路由;后台轮询
+    ├── view.rs        纯渲染:render() + render_chat/constellation/strike 等子视图
     ├── cmdmenu.rs     Tab 命令菜单(方向键驱动的命令选择,主交互入口)
     ├── settings.rs    TTS 引擎切换 overlay
     ├── theme.rs       调色板(墨底/phosphor-teal/amber)
@@ -89,11 +90,11 @@ src/
 - **Strike**(P2 星火接线):`Prompt` / `Flipped` / `Idle`。新词揭示后弹"词根 X 你在哪个已学的词里见过?",
   用户脑内回忆 → `Space` 翻牌 → 显示 FSRS 挑的最佳老词 → y/n 给那个老词记一次真复习。
   Strike 期间**阻塞新词评分**;Prompt 阶段隐藏 siblings 列表防剧透。节点只在被回忆时愈合。
-- **Ask**:`Idle` / `Pending` / `Answer` / `Failed`。揭示后 `a` 发起苏格拉底辨析
-  (LLM 提引导性问题,不给直接判决)。
-- **Derive**(推导对话):`Closed` / `Open` / `Pending`。新词未揭示时 `a` 打开多轮聊天,
-  学习者说出自己的拆解,LLM 拿着已核验词素与真实含义引导但绝不直说。Esc 收起保留对话,
-  回复在收起后到达以 toast 提示;换卡即清空。
+- **Chat**(AI 对话):`Closed` / `Open` / `Pending`,两种模式共用一个 overlay。
+  Derive 模式(新词未揭示,`a`):学习者说出自己的拆解,LLM 拿着已核验词素与真实含义引导但
+  绝不直说。Compare 模式(揭示后,`a`):打开即由模型先手给出易混词对照引导,可继续追问。
+  Esc 收起保留对话,回复在收起后到达以 toast 提示;换卡或换模式即清空。开启朗读(对话内
+  Tab)时,回复经中英混合语音(Kokoro 多语)走耳机门读出。
 - **Gate**:`Open` / `Closed`。Closed 时零音频。
 
 ### 键位(学习界面)
@@ -106,8 +107,8 @@ src/
 | `1-4` / `hjkl` | FSRS 评分(揭示后;hjkl 为 home-row 镜像) |
 | `y` / `n` | 星火接线:记得 / 想不起(给锚点词记一次真实 FSRS 复习) |
 | `u` | 撤销上次评分(评分后 3 秒内一步;窗口内 keybar 显示 `u 撤销` 提示) |
-| `Tab` | 命令菜单(↑↓ 选 Enter 确认,字母直达;推导对话输入时归输入所有) |
-| `a` | 新词未揭示=多轮推导对话;揭示后与复习=苏格拉底辨析(均需 DeepSeek 密钥) |
+| `Tab` | 命令菜单;AI 对话内=切换回复朗读(需中文语音模型) |
+| `a` | AI 对话:新词未揭示=推导模式;揭示后与复习=辨析模式(均需 DeepSeek 密钥) |
 | `w` | 打开该词 Wiktionary 词源页(揭示后) |
 | `g` | 星座:当前词的词根家族(同根已学词 + 只差一个词根的前沿暗星);overlay 内 `↑↓` 导航 `Space` 朗读 |
 | `s` | 设置:运行时切换 TTS 引擎 overlay(Kokoro/Matcha/Piper);done 态也可用 |
@@ -175,6 +176,7 @@ needle = "airpods"                              # 绑定耳机的名字子串
 engine = "kokoro"                                # kokoro | matcha | piper（运行时按 s 切换）
 voice = "af"                                     # kokoro-en-v0_19 的 11 个音色之一(手改生效)
 speed = 1.0
+chat_speak = false                               # AI 回复朗读（需中文语音模型，对话内 Tab 切换）
 ```
 
-学习本身**离线可用、无需密钥**。辨析 / 推导对话才需要 DeepSeek 密钥(`require_key()` 会 bail)。
+学习本身**离线可用、无需密钥**。AI 对话才需要 DeepSeek 密钥(`require_key()` 会 bail)。

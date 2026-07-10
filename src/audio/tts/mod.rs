@@ -24,6 +24,11 @@ pub enum TtsEngineKind {
     Kokoro,
     Matcha,
     Piper,
+    /// The chat voice (Kokoro multi-lang zh+en) — narrates AI replies (Chinese
+    /// with embedded English). Not a study engine: `all()` excludes it, so the
+    /// settings overlay and wizard's study-engine picker never offer it as the
+    /// word pronouncer.
+    KokoroZh,
 }
 
 impl TtsEngineKind {
@@ -32,6 +37,7 @@ impl TtsEngineKind {
             TtsEngineKind::Kokoro => "kokoro",
             TtsEngineKind::Matcha => "matcha",
             TtsEngineKind::Piper => "piper",
+            TtsEngineKind::KokoroZh => "kokoro-zh",
         }
     }
 
@@ -40,10 +46,13 @@ impl TtsEngineKind {
             "kokoro" => Some(TtsEngineKind::Kokoro),
             "matcha" => Some(TtsEngineKind::Matcha),
             "piper" => Some(TtsEngineKind::Piper),
+            "kokoro-zh" => Some(TtsEngineKind::KokoroZh),
             _ => None,
         }
     }
 
+    /// The STUDY engines — what the wizard's engine picker and the settings overlay
+    /// list. The chat voice (`Melo`) is a separate concern with its own opt-in.
     pub fn all() -> [TtsEngineKind; 3] {
         [
             TtsEngineKind::Kokoro,
@@ -75,8 +84,16 @@ pub struct EngineFiles {
     pub voices: Option<PathBuf>,
     /// Matcha's separate vocoder ONNX.
     pub vocoder: Option<PathBuf>,
-    /// Matcha/Piper lexicon (optional depending on the tarball).
-    pub lexicon: Option<PathBuf>,
+    /// Lexicon files, comma-joined into one sherpa config string by the session
+    /// (the zh+en chat voice carries an English and a Chinese lexicon).
+    pub lexicons: Vec<PathBuf>,
+    /// Text-normalization FSTs (dates/numbers → Chinese words), comma-joined into
+    /// the top-level `rule_fsts`.
+    pub rule_fsts: Vec<PathBuf>,
+    /// Jieba dictionary dir — the zh+en Kokoro's Chinese segmentation. Without it
+    /// the multi-lang frontend degrades and the model emits NaN samples (verified
+    /// against the official kokoro_tts_zh_en.rs example, which sets it).
+    pub dict_dir: Option<PathBuf>,
 }
 
 /// A speaker the engine can synthesize as. `sid` is sherpa's integer speaker id;
@@ -137,6 +154,7 @@ pub fn from_kind(kind: TtsEngineKind) -> Box<dyn TtsEngine> {
         TtsEngineKind::Kokoro => Box::new(kokoro::KokoroEngine),
         TtsEngineKind::Matcha => Box::new(matcha::MatchaEngine),
         TtsEngineKind::Piper => Box::new(piper::PiperEngine),
+        TtsEngineKind::KokoroZh => Box::new(kokoro_zh::KokoroZhEngine),
     }
 }
 
@@ -158,6 +176,7 @@ pub trait SynthSession: Send {
 }
 
 pub mod kokoro;
+pub mod kokoro_zh;
 pub mod matcha;
 pub mod piper;
 pub mod session;

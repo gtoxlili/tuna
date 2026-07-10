@@ -48,7 +48,9 @@ pub fn run() -> Result<()> {
     let needle = step_earphone(cur_needle);
     let key = step_key(cur_key);
     let (engine, voice) = step_engine();
-    init_config(existing.as_ref(), &needle, &key, &engine, &voice)?;
+    let prev_speak = existing.as_ref().map(|c| c.tts.chat_speak).unwrap_or(false);
+    let chat_speak = step_chat_voice(prev_speak);
+    init_config(existing.as_ref(), &needle, &key, &engine, &voice, chat_speak)?;
     Ok(())
 }
 
@@ -78,7 +80,7 @@ fn banner(is_rerun: bool) {
             paint(MUTED, "设置向导 · 回车保留当前值 ────────")
         );
     } else {
-        println!("\n  {}\n", paint(MUTED, "首次运行 · 三步设置 ────────"));
+        println!("\n  {}\n", paint(MUTED, "首次运行 · 四步设置 ────────"));
     }
 }
 
@@ -267,11 +269,62 @@ fn step_engine() -> (String, String) {
         return (chosen.id().to_string(), voice);
     }
 
-    std::fs::create_dir_all(&engine_dir).ok();
+    if !fetch_engine_files(eng.as_ref(), &engine_dir) {
+        return (chosen.id().to_string(), voice);
+    }
+    println!("     {}", paint(GREEN, "✓ 模型就位"));
+    (chosen.id().to_string(), voice)
+}
+
+/// Optional step ④: the zh+en chat voice (AI 对话朗读). AI replies are Chinese
+/// prose with embedded English; the study engines are English-only, so speaking
+/// them needs this separate Kokoro multi-lang model. Returns whether spoken
+/// replies should be enabled in the written config: enabled requires the model on
+/// disk (a toggle pointing at missing files would break at the first reply), and
+/// downloading it here IS the opt-in.
+fn step_chat_voice(prev_speak: bool) -> bool {
+    println!("\n  {} {}", paint(TEAL, &bold("④")), bold("AI 对话朗读（可选）"));
+    let kind = TtsEngineKind::KokoroZh;
+    let eng = from_kind(kind);
+    let dir = paths::engine_dir(kind);
+    if eng.models_present(&dir) {
+        let state = if prev_speak { "朗读已开启" } else { "聊天框内 Tab 开启朗读" };
+        println!(
+            "     {} {}",
+            paint(GREEN, "✓ 中文语音已就位"),
+            paint(MUTED, state)
+        );
+        return prev_speak;
+    }
+    println!(
+        "     {}",
+        paint(
+            MUTED,
+            "AI 聊天回复可以出声（中英混合语音，走绑定耳机）。下载 Kokoro 多语模型，~350MB。"
+        )
+    );
+    let s = prompt(&format!(
+        "     {} ",
+        paint(TEAL, "▸ 现在下载？(y / 回车跳过):")
+    ));
+    if !s.eq_ignore_ascii_case("y") {
+        println!("     {}", paint(MUTED, "· 跳过，之后可重跑 tuna setup 下载"));
+        return false;
+    }
+    if fetch_engine_files(eng.as_ref(), &dir) && eng.models_present(&dir) {
+        println!("     {}", paint(GREEN, "✓ 中文语音就位，朗读已开启（聊天框内 Tab 可关）"));
+        true
+    } else {
+        false
+    }
+}
+
+/// Download every artifact of `eng` into `engine_dir`, skipping ones already in
+/// place (extraction is atomic, so a present tarball subdir IS complete). Returns
+/// false if the user gave up after a failure.
+fn fetch_engine_files(eng: &dyn crate::audio::tts::TtsEngine, engine_dir: &Path) -> bool {
+    std::fs::create_dir_all(engine_dir).ok();
     for dl in eng.downloads() {
-        // Skip artifacts already in place (e.g. a Matcha re-run where only the
-        // vocoder was missing shouldn't re-pull the 73MB tarball). Extraction is
-        // atomic (staging dir + rename), so a present tarball subdir IS complete.
         let is_tarball = dl.dest.extension().map(|e| e == "bz2").unwrap_or(false);
         let already = if is_tarball {
             tarball_subdir(&dl.dest)
@@ -290,7 +343,7 @@ fn step_engine() -> (String, String) {
         }
         loop {
             let result = if is_tarball {
-                download_and_extract(&dl, &engine_dir)
+                download_and_extract(&dl, engine_dir)
             } else {
                 let dst = engine_dir.join(&dl.dest);
                 std::fs::create_dir_all(dst.parent().unwrap()).ok();
@@ -306,14 +359,13 @@ fn step_engine() -> (String, String) {
                     ));
                     if !again.eq_ignore_ascii_case("y") {
                         println!("     {}", paint(MUTED, "· 跳过，之后运行 tuna setup 补下"));
-                        return (chosen.id().to_string(), voice);
+                        return false;
                     }
                 }
             }
         }
     }
-    println!("     {}", paint(GREEN, "✓ 模型就位"));
-    (chosen.id().to_string(), voice)
+    true
 }
 
 /// Download a `.tar.bz2` to a temp file and extract it into `engine_dir`, then clean up.
@@ -474,6 +526,7 @@ fn init_config(
     key: &str,
     engine: &str,
     voice: &str,
+    chat_speak: bool,
 ) -> Result<()> {
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let dft = Config::default();
@@ -493,7 +546,9 @@ fn init_config(
          # engine = kokoro | matcha | piper（运行时按 s 打开设置切换）\n\
          engine = \"{engine}\"\n\
          voice = \"{voice}\"\n\
-         speed = {speed}\n\n\
+         speed = {speed}\n\
+         # AI 对话回复是否朗读（需要中文语音模型，聊天框内 Tab 切换）\n\
+         chat_speak = {chat_speak}\n\n\
          [a11y]\n\
          # reduced_motion = true 时跳过所有动画\n\
          reduced_motion = {reduced_motion}\n",

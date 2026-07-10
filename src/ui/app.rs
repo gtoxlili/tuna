@@ -142,26 +142,29 @@ pub struct GateStatus {
     pub device: Option<String>,
 }
 
-/// State of the on-demand Socratic 辨析 popup.
-pub enum Ask {
-    Idle,
-    Pending,
-    Answer(String),
-    Failed(String),
-}
-
-/// One turn in the derivation chat: the learner's message or the LLM's reply.
+/// One turn in an AI chat: the learner's message or the LLM's reply.
 #[derive(Clone)]
 pub struct ChatTurn {
     pub is_user: bool,
     pub text: String,
 }
 
-/// State of the derivation chat overlay (Phase A only — "拆" with LLM guidance).
+/// What the AI chat is for — decides the context handed to the model and the
+/// overlay's framing. `Derive` runs pre-reveal on a new word (the learner derives
+/// the meaning from morphemes; the model holds the ground truth and never states
+/// it); `Compare` runs post-reveal (distinguish the word from its confusables,
+/// opened by the model's own contrast lead-in).
+#[derive(Clone, Copy, PartialEq)]
+pub enum ChatMode {
+    Derive,
+    Compare,
+}
+
+/// State of the AI chat overlay.
 /// Closed = collapsed (the conversation, if any, is kept until the card changes);
 /// Open = user can type; Pending = message sent, awaiting LLM.
 #[derive(PartialEq)]
-pub enum DeriveState {
+pub enum ChatState {
     Closed,
     Open,
     Pending,
@@ -233,8 +236,9 @@ pub struct App {
     pub show_graph: bool,
     /// Whether the `?` help overlay is open (context-sensitive key reference).
     pub show_help: bool,
-    /// Vertical scroll offset for the Socratic `Ask::Answer` popup — arrow keys scroll.
-    pub ask_scroll: usize,
+    /// Vertical scroll offset of the help overlay — the reference outgrows a small
+    /// terminal, and a reference whose tail can't be reached teaches nothing.
+    pub help_scroll: usize,
     /// The current word's root-family, computed when the overlay opens.
     pub graph: Vec<MorphemeGroup>,
     /// Flattened cursor into the constellation overlay's members (arrow-key nav).
@@ -250,24 +254,26 @@ pub struct App {
     /// is snapshotted (not re-derived by `pos - 1`) because `load_current` may have
     /// skipped entries with no dict entry after the grade.
     undo_snap: Option<(DeckCard, usize, Instant)>,
-    // Socratic 辨析 (live DeepSeek on a worker thread)
-    pub ask: Ask,
-    ask_rx: Option<std::sync::mpsc::Receiver<(u64, std::result::Result<String, String>)>>,
-    /// Generation counter for ask requests — each new request increments this.
-    /// Worker threads capture the gen at spawn time and send it back; poll_async
-    /// discards results whose gen != current, so a cancelled-then-reopened ask
-    /// doesn't land a stale answer from the first (still-billing) worker.
-    ask_gen: u64,
-    /// Multi-turn derivation chat state (Phase A "拆" with LLM guidance).
-    pub derive: DeriveState,
-    /// Conversation history for the current card's derivation chat.
-    pub derive_turns: Vec<ChatTurn>,
-    /// Receiver for derivation chat LLM responses (separate from ask_rx).
-    derive_rx: Option<std::sync::mpsc::Receiver<std::result::Result<String, String>>>,
-    /// Scroll offset for the derivation chat popup, counted in rows up from the
-    /// BOTTOM (0 = pinned to the newest message). The render side converts this to
-    /// a top offset, so new replies are always in view without chasing them.
-    pub derive_scroll: usize,
+    /// AI chat overlay state (one overlay, two modes — see `ChatMode`).
+    pub chat: ChatState,
+    /// What the current conversation is for; a mode switch starts a fresh thread.
+    pub chat_mode: ChatMode,
+    /// Conversation history for the current card's chat.
+    pub chat_turns: Vec<ChatTurn>,
+    /// Receiver for chat LLM responses. Each send gets a fresh channel, so a
+    /// dropped receiver IS the cancellation — a stale worker's send just fails.
+    chat_rx: Option<std::sync::mpsc::Receiver<std::result::Result<String, String>>>,
+    /// Scroll offset for the chat popup, counted in rows up from the BOTTOM
+    /// (0 = pinned to the newest message). The render side converts this to a top
+    /// offset, so new replies are always in view without chasing them.
+    pub chat_scroll: usize,
+    /// Whether AI replies are spoken aloud (through the earphone gate, using the
+    /// zh+en chat voice model). Toggled with Tab inside the chat; persisted to
+    /// config so the preference survives sessions.
+    pub chat_speak: bool,
+    /// Warm synth session for the chat voice model — separate from the study
+    /// engine's session, since they are different models.
+    chat_tts_server: Arc<Mutex<Option<Box<dyn SynthSession>>>>,
     ds_base: String,
     ds_key: String,
     ds_chat_model: String,
@@ -309,19 +315,19 @@ impl App {
             esc_confirm: None,
             show_graph: false,
             show_help: false,
-            ask_scroll: 0,
+            help_scroll: 0,
             graph: Vec::new(),
             graph_cursor: 0,
             settings: Settings::default(),
             cmdmenu: CommandMenu::default(),
             undo_snap: None,
-            ask: Ask::Idle,
-            ask_rx: None,
-            ask_gen: 0,
-            derive: DeriveState::Closed,
-            derive_turns: Vec::new(),
-            derive_rx: None,
-            derive_scroll: 0,
+            chat: ChatState::Closed,
+            chat_mode: ChatMode::Derive,
+            chat_turns: Vec::new(),
+            chat_rx: None,
+            chat_scroll: 0,
+            chat_speak: cfg.tts.chat_speak,
+            chat_tts_server: Arc::new(Mutex::new(None)),
             ds_base: cfg.deepseek.base_url.clone(),
             ds_key: cfg.deepseek.api_key.clone(),
             ds_chat_model: cfg.deepseek.chat_model.clone(),
@@ -349,15 +355,12 @@ impl App {
         // rating key was pressed. It self-expires in poll_async (D6) and is cleared
         // explicitly on undo_grade. Clearing it here would make the flash never show.
         self.strike_anim = None;
-        self.ask = Ask::Idle;
-        self.ask_rx = None;
-        self.ask_scroll = 0;
         self.show_graph = false;
         self.graph_cursor = 0;
-        self.derive = DeriveState::Closed;
-        self.derive_turns.clear();
-        self.derive_rx = None;
-        self.derive_scroll = 0;
+        self.chat = ChatState::Closed;
+        self.chat_turns.clear();
+        self.chat_rx = None;
+        self.chat_scroll = 0;
         // A new card is loading — prime the slide-in so it fades up rather than
         // jump-cutting. reset_motion users get None (no fade, instant).
         self.reveal_anim = None;
@@ -447,16 +450,32 @@ impl App {
         // overlay so the learner can act without a double-press (e.g. 's' over settings
         // closes help then toggles settings in one stroke).
         if self.show_help {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
-                self.show_help = false;
-                return Ok(());
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?') => {
+                    self.show_help = false;
+                    return Ok(());
+                }
+                // The reference is longer than a small terminal — ↑↓ scroll it.
+                // The render side clamps to the actual content, this soft cap just
+                // keeps the offset from wandering unboundedly.
+                KeyCode::Up => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1);
+                    return Ok(());
+                }
+                KeyCode::Down => {
+                    self.help_scroll = (self.help_scroll + 1).min(40);
+                    return Ok(());
+                }
+                _ => {
+                    self.show_help = false;
+                    // Fall through — the key reaches the overlay/base handler below.
+                }
             }
-            self.show_help = false;
-            // Fall through — the key reaches the overlay/base handler below.
-        } else if matches!(key.code, KeyCode::Char('?')) && self.derive != DeriveState::Open {
+        } else if matches!(key.code, KeyCode::Char('?')) && self.chat != ChatState::Open {
             // While the chat input is live, '?' is a character the learner may
             // legitimately type — it falls through to the input instead of help.
             self.show_help = true;
+            self.help_scroll = 0;
             return Ok(());
         }
         // The settings overlay has the highest priority — it swallows all input.
@@ -464,63 +483,21 @@ impl App {
             self.on_settings_key(key)?;
             return Ok(());
         }
-        // The Socratic popup swallows input; 'a' or Esc closes it. Arrow keys scroll
-        // the answer when it overflows the popup (DeepSeek 输出经常超 30 行).
-        if !matches!(self.ask, Ask::Idle) {
-            if matches!(key.code, KeyCode::Char('a') | KeyCode::Esc) {
-                self.ask = Ask::Idle;
-                self.ask_rx = None;
-                self.ask_scroll = 0;
-                return Ok(());
-            }
-            if let Ask::Answer(text) = &self.ask {
-                match key.code {
-                    KeyCode::Down | KeyCode::Right => {
-                        // Clamp so the user can't scroll far past the content into
-                        // blank. Wrapping means the DISPLAY line count exceeds the
-                        // raw count (a clamp on raw lines cut off the tail of long
-                        // wrapped answers), so estimate wrapped rows generously: a
-                        // few rows of over-scroll beats an unreachable ending.
-                        let rows: usize = text
-                            .lines()
-                            .map(|l| l.chars().count() / 24 + 1)
-                            .sum();
-                        self.ask_scroll = (self.ask_scroll + 1).min(rows.saturating_sub(3));
-                        return Ok(());
-                    }
-                    KeyCode::Up | KeyCode::Left => {
-                        self.ask_scroll = self.ask_scroll.saturating_sub(1);
-                        return Ok(());
-                    }
-                    _ => {}
-                }
-            }
-            // The overlay swallows keys that would otherwise grade or open other
-            // overlays. Surface the swallow — a silent return makes the user think
-            // the grade registered when it didn't.
-            if matches!(
-                key.code,
-                KeyCode::Char('1'..='4' | 'h' | 'j' | 'k' | 'l' | 'w' | 's' | 'g' | 'u' | ' ')
-                    | KeyCode::Enter
-            ) {
-                self.toast = Some(ToastMsg::info("先 a/Esc 关闭辨析"));
-            }
-            return Ok(());
-        }
         // The constellation overlay swallows input; arrow nav + Space speak + g/Esc close.
         if self.show_graph {
             return self.on_graph_key(key);
         }
-        // The derivation chat overlay — multi-turn LLM conversation for Phase A "拆".
-        // A text-input surface owns ALL its keys, including Tab: opening the command
-        // menu mid-sentence (and firing "辨析" with a stray 'a', wiping the draft)
-        // is exactly the kind of key leak a chat box must not have.
-        if self.derive != DeriveState::Closed {
-            return self.on_derive_key(key);
+        // The AI chat overlay — multi-turn LLM conversation (derive pre-reveal,
+        // compare post-reveal). A text-input surface owns ALL its keys, including
+        // Tab: opening the command menu mid-sentence (and firing a command with a
+        // stray letter, wiping the draft) is exactly the kind of key leak a chat
+        // box must not have. Tab here toggles the AI voice instead.
+        if self.chat != ChatState::Closed {
+            return self.on_chat_key(key);
         }
         // The command menu: Tab opens it (anywhere except deeper overlays), ↑↓ moves,
         // Enter fires the selected command, letters (a/w/g/s/?) fire directly, Esc/Tab
-        // close. The menu sits below settings/ask/graph/derive — those swallow input
+        // close. The menu sits below settings/graph/chat — those swallow input
         // first — but above help and the base card, so it's reachable from Prompt,
         // Revealed, and done alike (settings is a runtime concern, not card-stage-bound).
         if self.cmdmenu.open {
@@ -659,8 +636,8 @@ impl App {
             }
         }
 
-        // Command keys. `a` on a new word's Prompt opens the derivation chat (拆
-        // with LLM guidance); on Revealed or review cards it opens generic 辨析.
+        // Command keys. `a` on a new word's Prompt opens the derive chat (拆 with
+        // LLM guidance); once revealed it opens the compare chat (易混词辨析).
         // The other commands (w/g/s/grade) require revealed.
         let is_new_prompt = matches!(
             self.current.as_ref().map(|c| (c.is_new, c.stage)),
@@ -668,11 +645,9 @@ impl App {
         );
         let done = self.done();
         match key.code {
-            // `a` needs a current card: derive chat on a new word's Prompt, Socratic
-            // 辨析 once revealed. At done there is no word to ask about — binding it
-            // there would be a silent no-op (ask_socratic returns on current=None).
-            KeyCode::Char('a') if is_new_prompt => self.start_derive_chat(),
-            KeyCode::Char('a') if revealed => self.ask_socratic(),
+            // `a` needs a current card — at done there is no word to chat about.
+            KeyCode::Char('a') if is_new_prompt => self.open_chat(ChatMode::Derive),
+            KeyCode::Char('a') if revealed => self.open_chat(ChatMode::Compare),
             KeyCode::Char('w') if revealed => self.open_wiktionary(),
             KeyCode::Char('g') if revealed => self.open_graph(),
             // Settings is a runtime concern — reachable even after the session ends
@@ -744,22 +719,25 @@ impl App {
     /// direct-letter shortcuts so the two paths never drift.
     fn fire_command(&mut self, label: &str) -> Result<()> {
         match label {
-            "辨析" => {
+            "对话" => {
                 let is_new_prompt = matches!(
                     self.current.as_ref().map(|c| (c.is_new, c.stage)),
                     Some((true, Stage::Prompt))
                 );
-                if is_new_prompt {
-                    self.start_derive_chat();
+                self.open_chat(if is_new_prompt {
+                    ChatMode::Derive
                 } else {
-                    self.ask_socratic();
-                }
+                    ChatMode::Compare
+                });
             }
             "词源" => self.open_wiktionary(),
             "星座" => self.open_graph(),
             "设置" => self.open_settings(),
             "撤销评分" => return self.undo_grade(),
-            "帮助" => self.show_help = true,
+            "帮助" => {
+                self.show_help = true;
+                self.help_scroll = 0;
+            }
             _ => {}
         }
         Ok(())
@@ -829,13 +807,26 @@ impl App {
     /// instantly; uncached ones synthesize on a worker thread (spinner shows the
     /// `label`), then play. `label` is the short display string for the spinner.
     fn play_audio(&mut self, text: &str, label: &str) {
+        self.play_audio_via(self.tts.clone(), self.tts_server.clone(), text, label);
+    }
+
+    /// The engine-agnostic synth+play path: `play_audio` routes the study engine
+    /// through it, `speak_reply` the chat voice. One in-flight synth at a time
+    /// (shared `tts_pending`); everything plays through the earphone gate.
+    fn play_audio_via(
+        &mut self,
+        tts: TtsConfig,
+        server: Arc<Mutex<Option<Box<dyn SynthSession>>>>,
+        text: &str,
+        label: &str,
+    ) {
         // Re-validate the gate at the moment of playing, not on the 1s poll cadence.
         self.refresh_gate();
         if !self.gate.open {
             self.toast = Some(ToastMsg::warn("耳机未连接 · 静默"));
             return;
         }
-        let path = self.tts.cache_path(text);
+        let path = tts.cache_path(text);
         if path.exists() {
             self.play_cached(label, &path);
             return;
@@ -847,14 +838,12 @@ impl App {
             self.toast = Some(ToastMsg::info("合成中，请稍候"));
             return;
         }
-        if !self.tts.models_present() {
+        if !tts.models_present() {
             self.toast = Some(ToastMsg::error(
                 "发音模型未下载（运行 tuna setup 下载，或按 s 打开设置）",
             ));
             return;
         }
-        let tts = self.tts.clone();
-        let server = self.tts_server.clone();
         let (t, out) = (text.to_string(), path.clone());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -1026,8 +1015,7 @@ impl App {
     }
 
     pub fn is_animating(&self) -> bool {
-        matches!(self.ask, Ask::Pending)
-            || self.derive == DeriveState::Pending
+        self.chat == ChatState::Pending
             || self.tts_pending.is_some()
             || self
                 .strike_anim
@@ -1098,11 +1086,6 @@ impl App {
         self.undo_snap
             .as_ref()
             .is_some_and(|(_, _, t)| t.elapsed() <= Duration::from_secs(3))
-    }
-
-    /// Current Socratic-answer scroll offset (arrow keys in the Ask::Answer popup).
-    pub fn ask_scroll(&self) -> usize {
-        self.ask_scroll
     }
 
     /// Pick the best learned sibling to anchor a new word: a shared root, weighted by
@@ -1190,35 +1173,6 @@ impl App {
         false
     }
 
-    /// Fire a Socratic 辨析 request on a worker thread (non-blocking UI).
-    fn ask_socratic(&mut self) {
-        let Some(c) = self.current.as_ref() else {
-            return;
-        };
-        if self.ds_key.is_empty() {
-            self.ask = Ask::Failed("未配置 DeepSeek 密钥（~/.tuna/config.toml）".to_string());
-            return;
-        }
-        let word = c.entry.word.clone();
-        let context = socratic_context(c);
-        let (base, key, model) = (
-            self.ds_base.clone(),
-            self.ds_key.clone(),
-            self.ds_chat_model.clone(),
-        );
-        self.ask_gen = self.ask_gen.wrapping_add(1);
-        let gen_id = self.ask_gen;
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let client = DeepSeek::new(base, key);
-            let res = crate::llm::socratic::socratic(&client, &model, &word, &context)
-                .map_err(|e| e.to_string());
-            let _ = tx.send((gen_id, res));
-        });
-        self.ask_rx = Some(rx);
-        self.ask = Ask::Pending;
-    }
-
     /// Open the current word's Wiktionary etymology in the browser — the citation
     /// behind every root is one keystroke away. Honesty as a keypress.
     fn open_wiktionary(&mut self) {
@@ -1262,40 +1216,46 @@ impl App {
         self.show_graph = true;
     }
 
-    /// Send the learner's OWN derivation guess to DeepSeek for a Socratic critique of
-    /// his reasoning — the guess becomes a live channel, not a dead echo.
-    /// Open (or reopen) the derivation chat overlay for the current new word.
-    /// Doesn't send a message yet — the user types their guess and presses Enter.
-    /// Reopening resumes the same conversation: the turns survive an Esc-collapse,
-    /// and if a reply is still in flight the overlay comes back in Pending so the
-    /// spinner picks up where it left off. If no DeepSeek key is configured, show
-    /// the failure immediately.
-    fn start_derive_chat(&mut self) {
+    /// Open (or reopen) the AI chat overlay in `mode`. Reopening the SAME mode
+    /// resumes the conversation: the turns survive an Esc-collapse, and if a reply
+    /// is still in flight the overlay comes back in Pending so the spinner picks
+    /// up where it left off. A different mode is a different conversation — derive
+    /// (pre-reveal) and compare (post-reveal) never share a thread even on the same
+    /// card. Compare mode with no history kicks off immediately: the learner came
+    /// to hear the distinction, not to compose an opening question.
+    fn open_chat(&mut self, mode: ChatMode) {
         if self.ds_key.is_empty() {
             self.toast = Some(ToastMsg::error(
                 "未配置 DeepSeek 密钥（~/.tuna/config.toml）",
             ));
             return;
         }
-        self.derive_scroll = 0;
-        self.derive = if self.derive_rx.is_some() {
-            DeriveState::Pending
+        if mode != self.chat_mode {
+            self.chat_turns.clear();
+            self.chat_rx = None;
+            self.input.clear();
+        }
+        self.chat_mode = mode;
+        self.chat_scroll = 0;
+        self.chat = if self.chat_rx.is_some() {
+            ChatState::Pending
         } else {
-            DeriveState::Open
+            ChatState::Open
         };
+        if mode == ChatMode::Compare && self.chat_turns.is_empty() && self.chat_rx.is_none() {
+            self.send_chat_msg(String::new()); // kickoff — the model opens
+        }
     }
 
-    /// Send the current input as a new message in the derivation chat. Spawns a
-    /// worker thread that calls the LLM with the full conversation history.
-    fn send_derive_msg(&mut self) {
-        let msg = self.input.trim().to_string();
-        if msg.is_empty() {
-            return;
-        }
+    /// Send a message in the current chat (empty = the compare-mode kickoff, which
+    /// shows no user turn). Spawns a worker thread that calls the LLM with the
+    /// mode's context + recent conversation history.
+    fn send_chat_msg(&mut self, msg: String) {
         let Some(c) = self.current.as_ref() else {
             return;
         };
         let word = c.entry.word.clone();
+        let mode = self.chat_mode;
         let morphemes = c
             .enrichment
             .as_ref()
@@ -1307,8 +1267,8 @@ impl App {
                     .join(" + ")
             })
             .unwrap_or_default();
-        // The verified gloss — the chat system prompt promises the model the ground
-        // truth so it can steer without inventing a wrong "correct answer".
+        // The verified gloss — both chat modes hand the model the ground truth so
+        // it can steer without inventing a wrong "correct answer".
         let meaning = c
             .enrichment
             .as_ref()
@@ -1322,13 +1282,26 @@ impl App {
                     .map(|t| t.trim().to_string())
             })
             .unwrap_or_default();
+        // Known confusable/near-synonym neighbours, for the compare mode's context.
+        let neighbours = c
+            .enrichment
+            .as_ref()
+            .map(|en| {
+                en.graph_edges
+                    .iter()
+                    .filter(|e| e.relation == "confusable" || e.relation == "synonym")
+                    .map(|e| e.target.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
         // Stash the user message + recent history for the worker. Cap the resent
         // history — a marathon chat would otherwise inflate every request's prompt
         // with the full transcript; the last dozen turns carry the live thread.
         const HISTORY_CAP: usize = 12;
-        let skip = self.derive_turns.len().saturating_sub(HISTORY_CAP);
+        let skip = self.chat_turns.len().saturating_sub(HISTORY_CAP);
         let history: Vec<(bool, String)> = self
-            .derive_turns
+            .chat_turns
             .iter()
             .skip(skip)
             .map(|t| (t.is_user, t.text.clone()))
@@ -1342,51 +1315,64 @@ impl App {
         let send_msg = msg.clone();
         std::thread::spawn(move || {
             let client = DeepSeek::new(base, key);
-            let res = crate::llm::socratic::derive_chat(
-                &client, &model, &word, &morphemes, &meaning, &history, &send_msg,
-            )
+            let res = match mode {
+                ChatMode::Derive => crate::llm::socratic::derive_chat(
+                    &client, &model, &word, &morphemes, &meaning, &history, &send_msg,
+                ),
+                ChatMode::Compare => crate::llm::socratic::compare_chat(
+                    &client, &model, &word, &meaning, &neighbours, &history, &send_msg,
+                ),
+            }
             .map_err(|e| e.to_string());
             let _ = tx.send(res);
         });
         // Record the user's message immediately so it shows in the chat view.
-        self.derive_turns.push(ChatTurn {
-            is_user: true,
-            text: msg,
-        });
+        if !msg.is_empty() {
+            self.chat_turns.push(ChatTurn {
+                is_user: true,
+                text: msg,
+            });
+        }
         self.input.clear();
-        self.derive_rx = Some(rx);
-        self.derive = DeriveState::Pending;
+        self.chat_rx = Some(rx);
+        self.chat = ChatState::Pending;
     }
 
-    /// Handle keys while the derivation chat overlay is open (or pending).
+    /// Handle keys while the chat overlay is open (or pending).
     /// Esc collapses the overlay but KEEPS the conversation — the learner often
     /// wants to glance at the card under the popup and come back; `a` reopens with
     /// the history intact (it only resets when the card changes). A reply that
-    /// lands while collapsed is announced by toast, not lost.
-    fn on_derive_key(&mut self, key: KeyEvent) -> Result<()> {
+    /// lands while collapsed is announced by toast, not lost. Tab toggles whether
+    /// AI replies are spoken aloud.
+    fn on_chat_key(&mut self, key: KeyEvent) -> Result<()> {
         // ↑↓ scroll the history in either state (reading back mid-wait is normal).
-        // `derive_scroll` counts rows up from the BOTTOM: 0 = pinned to the newest
+        // `chat_scroll` counts rows up from the BOTTOM: 0 = pinned to the newest
         // message, so an arriving reply is always visible without chasing it.
         match key.code {
             KeyCode::Up => {
-                self.derive_scroll = (self.derive_scroll + 1).min(self.derive_rows_cap());
+                self.chat_scroll = (self.chat_scroll + 1).min(self.chat_rows_cap());
                 return Ok(());
             }
             KeyCode::Down => {
-                self.derive_scroll = self.derive_scroll.saturating_sub(1);
+                self.chat_scroll = self.chat_scroll.saturating_sub(1);
                 return Ok(());
             }
             KeyCode::Esc => {
-                self.derive = DeriveState::Closed;
+                self.chat = ChatState::Closed;
+                return Ok(());
+            }
+            KeyCode::Tab => {
+                self.toggle_chat_speak();
                 return Ok(());
             }
             _ => {}
         }
-        if self.derive == DeriveState::Open {
+        if self.chat == ChatState::Open {
             match key.code {
                 KeyCode::Enter => {
-                    if !self.input.trim().is_empty() {
-                        self.send_derive_msg();
+                    let msg = self.input.trim().to_string();
+                    if !msg.is_empty() {
+                        self.send_chat_msg(msg);
                     }
                 }
                 KeyCode::Backspace => {
@@ -1403,62 +1389,107 @@ impl App {
         Ok(())
     }
 
+    /// Toggle spoken AI replies. Requires the zh+en chat voice model; enabling
+    /// without it would be a promise the next reply can't keep, so the toggle
+    /// refuses and points at the download instead. Persisted to config.
+    fn toggle_chat_speak(&mut self) {
+        if !self.chat_speak {
+            let voice = from_kind(TtsEngineKind::KokoroZh);
+            if !voice.models_present(&paths::engine_dir(TtsEngineKind::KokoroZh)) {
+                self.toast = Some(ToastMsg::error(
+                    "中文语音未下载（运行 tuna setup 下载，~350MB）",
+                ));
+                return;
+            }
+        }
+        self.chat_speak = !self.chat_speak;
+        if let Err(e) = crate::config::update_chat_speak(self.chat_speak) {
+            self.toast = Some(ToastMsg::warn(format!("本次生效，写入配置失败: {e}")));
+            return;
+        }
+        self.toast = Some(ToastMsg::info(if self.chat_speak {
+            "♪ AI 朗读 开"
+        } else {
+            "AI 朗读 关"
+        }));
+    }
+
+    /// The chat voice's TtsConfig — the zh+en model that narrates AI replies.
+    /// Separate from the study engine: study clips are English words/sentences,
+    /// chat replies are Chinese prose with embedded English.
+    fn chat_tts_config(&self) -> TtsConfig {
+        let kind = TtsEngineKind::KokoroZh;
+        TtsConfig {
+            kind,
+            voice: from_kind(kind).default_voice().id,
+            speed: 1.0,
+            cache_dir: paths::audio_cache(),
+            engine_dir: paths::engine_dir(kind),
+        }
+    }
+
+    /// Speak an AI reply through the earphone gate. Silent no-op when the voice
+    /// model is missing (the Tab toggle guards enabling; this covers a model dir
+    /// deleted afterwards) — the reply text itself is already on screen.
+    fn speak_reply(&mut self, text: &str) {
+        let cfg = self.chat_tts_config();
+        if !cfg.models_present() {
+            return;
+        }
+        let clean = strip_markup(text);
+        if clean.is_empty() {
+            return;
+        }
+        let server = self.chat_tts_server.clone();
+        self.play_audio_via(cfg, server, &clean, "AI");
+    }
+
     /// A soft upper bound on how far back the chat can scroll — a rough row count
     /// of the conversation. Render-side pinning clamps exactly; this just stops the
     /// offset growing unbounded (which would need N presses of ↓ to come back).
-    fn derive_rows_cap(&self) -> usize {
-        self.derive_turns
+    fn chat_rows_cap(&self) -> usize {
+        self.chat_turns
             .iter()
             .map(|t| t.text.chars().count() / 32 + 2)
             .sum()
     }
 
-    /// Drain any completed background work (Socratic answer, on-demand synth).
+    /// Drain any completed background work (chat replies, on-demand synth).
     pub fn poll_async(&mut self) {
-        if let Some(rx) = &self.ask_rx
-            && let Ok((gen_id, res)) = rx.try_recv() {
-                // Discard stale results: if the user cancelled (Esc/a) and reopened ask,
-                // ask_gen has moved on and this result is from the old (still-billing)
-                // worker. Dropping it stops a stale answer popping up over the new one.
-                if gen_id == self.ask_gen && matches!(self.ask, Ask::Pending) {
-                    self.ask = match res {
-                        Ok(t) => Ask::Answer(t),
-                        Err(e) => Ask::Failed(e),
-                    };
-                }
-                self.ask_rx = None;
-            }
-        // Derivation chat response — append the LLM reply to the conversation. The
-        // conversation survives an Esc-collapse, so the reply lands in the history
-        // either way; when collapsed we announce it by toast instead of popping the
-        // overlay back open uninvited. (Card switches clear derive_rx, so a stale
-        // reply can never land on the wrong word.)
-        if let Some(rx) = &self.derive_rx
-            && let Ok(res) = rx.try_recv() {
-                let collapsed = self.derive == DeriveState::Closed;
-                match res {
-                    Ok(text) => {
-                        self.derive_turns.push(ChatTurn {
-                            is_user: false,
-                            text,
-                        });
-                        self.derive_scroll = 0; // pin to the newest message
-                        if collapsed {
-                            self.toast = Some(ToastMsg::info("推导回复已就绪 · 按 a 查看"));
-                        } else {
-                            self.derive = DeriveState::Open;
-                        }
+        // Chat reply — append it to the conversation. The conversation survives an
+        // Esc-collapse, so the reply lands in the history either way; when collapsed
+        // we announce it by toast instead of popping the overlay back open uninvited.
+        // (Card switches clear chat_rx, so a stale reply can never land on the wrong
+        // word.) Taken out of the receiver first: speaking the reply needs &mut self.
+        let chat_res = self.chat_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(res) = chat_res {
+            self.chat_rx = None;
+            let collapsed = self.chat == ChatState::Closed;
+            match res {
+                Ok(text) => {
+                    if self.chat_speak {
+                        self.speak_reply(&text);
                     }
-                    Err(e) => {
-                        let first = e.lines().next().unwrap_or("请求失败");
-                        self.toast = Some(ToastMsg::error(format!("推导对话失败: {first}")));
-                        if !collapsed {
-                            self.derive = DeriveState::Open;
-                        }
+                    self.chat_turns.push(ChatTurn {
+                        is_user: false,
+                        text,
+                    });
+                    self.chat_scroll = 0; // pin to the newest message
+                    if collapsed {
+                        self.toast = Some(ToastMsg::info("AI 回复已就绪 · 按 a 查看"));
+                    } else {
+                        self.chat = ChatState::Open;
                     }
                 }
-                self.derive_rx = None;
+                Err(e) => {
+                    let first = e.lines().next().unwrap_or("请求失败");
+                    self.toast = Some(ToastMsg::error(format!("对话失败: {first}")));
+                    if !collapsed {
+                        self.chat = ChatState::Open;
+                    }
+                }
             }
+        }
         if let Some(rx) = &self.tts_rx
             && let Ok(res) = rx.try_recv() {
                 let word = self.tts_pending.take().unwrap_or_default();
@@ -1641,27 +1672,21 @@ impl App {
     }
 }
 
-/// Build context for a Socratic request from the card's enrichment (confusables +
-/// near-synonyms + gloss) so the model contrasts the right neighbours.
-fn socratic_context(c: &CardView) -> String {
-    let mut s = String::new();
-    if let Some(en) = &c.enrichment {
-        if !en.gloss_zh.is_empty() {
-            s.push_str(&format!("词义: {}\n", en.gloss_zh));
-        }
-        let neighbours: Vec<String> = en
-            .graph_edges
-            .iter()
-            .filter(|e| e.relation == "confusable" || e.relation == "synonym")
-            .map(|e| e.target.clone())
-            .collect();
-        if !neighbours.is_empty() {
-            s.push_str(&format!("易混/近义: {}\n", neighbours.join(", ")));
-        }
-    } else if let Some(t) = c.entry.translation.lines().next() {
-        s.push_str(&format!("词义: {}\n", t.trim()));
-    }
-    s
+/// Reduce an AI reply to speakable prose: markdown marks (`*`, `` ` ``, `#`) and
+/// list dashes carry nothing for the ear, so they're dropped before synthesis.
+fn strip_markup(text: &str) -> String {
+    let flat: String = text
+        .chars()
+        .filter(|c| !matches!(c, '*' | '`' | '#'))
+        .collect();
+    flat.lines()
+        .map(|l| {
+            let l = l.trim();
+            l.strip_prefix("- ").unwrap_or(l)
+        })
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Render a `chrono::Duration` as a compact Chinese human interval.

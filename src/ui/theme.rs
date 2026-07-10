@@ -20,6 +20,9 @@ pub const SLATE: Color = Color::Rgb(19, 33, 45);
 pub const ABYSS: Color = Color::Rgb(10, 21, 32);
 /// "Good" grade / success.
 pub const GREEN: Color = Color::Rgb(87, 192, 139);
+/// Row wash under the current speak target — ABYSS pulled ~12% toward CURRENT.
+/// Soft enough to read as a highlight strip, not a block cursor.
+pub const SPEAK_BG: Color = Color::Rgb(15, 44, 51);
 
 // RGB components of ABYSS — used by the grade-flash tint math in render_card.
 pub const ABYSS_R: u8 = 10;

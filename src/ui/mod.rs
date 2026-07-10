@@ -89,25 +89,28 @@ pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
         println!("\n── STRIKE ARC (mid-fire) ──\n{}", term.backend());
     }
 
-    // Verify the Socratic popup renders markdown (bold/lists), not raw syntax.
-    app.ask = app::Ask::Answer(
-        "先分别拆开词根：\n- **transport**：trans-（跨）+ port（携带）\n- **transit**：trans-（跨）+ it（走）\n\n提问：运送货物与自身穿越，语义上会导向怎样的不同？\n\n核心差异：**transport** 强调把对象运到另一处；**transit** 只突出经过、中转。"
+    // Verify the compare chat renders markdown (bold/lists), not raw syntax.
+    app.chat = app::ChatState::Open;
+    app.chat_mode = app::ChatMode::Compare;
+    app.chat_turns.push(app::ChatTurn {
+        is_user: false,
+        text: "先分别拆开词根：\n- **transport**：trans-（跨）+ port（携带）\n- **transit**：trans-（跨）+ it（走）\n\n提问：运送货物与自身穿越，语义上会导向怎样的不同？"
             .to_string(),
-    );
+    });
     term.draw(|f| view::render(f, &app))?;
-    println!("\n── SOCRATIC POPUP (markdown) ──\n{}", term.backend());
+    println!("\n── COMPARE CHAT (markdown) ──\n{}", term.backend());
 
     // Verify the derive chat popup: history + input line pinned to the bottom edge.
-    app.ask = app::Ask::Idle;
+    app.chat_turns.clear();
     if let Some(c) = app.current.as_mut() {
         c.stage = app::Stage::Prompt;
     }
-    app.derive = app::DeriveState::Open;
-    app.derive_turns.push(app::ChatTurn {
+    app.chat_mode = app::ChatMode::Derive;
+    app.chat_turns.push(app::ChatTurn {
         is_user: true,
         text: "我看到 spect 是看".to_string(),
     });
-    app.derive_turns.push(app::ChatTurn {
+    app.chat_turns.push(app::ChatTurn {
         is_user: false,
         text: "对，spect 抓对了。再看词尾 -ate，它常把词变成什么词性？".to_string(),
     });

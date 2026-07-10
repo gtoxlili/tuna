@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use super::app::{
-    App, Ask, CardView, DeriveState, MORPHEME_CELL_FADE_MS, MORPHEME_STAGGER_MS, Stage, Strike,
+    App, CardView, ChatMode, ChatState, MORPHEME_CELL_FADE_MS, MORPHEME_STAGGER_MS, Stage, Strike,
 };
 use super::settings;
 use super::theme::*;
@@ -31,6 +31,37 @@ fn blend(a: Color, b: Color, t: f64) -> Color {
     };
     let lerp = |x: u8, y: u8| -> u8 { (x as f64 * (1.0 - t) + y as f64 * t).round() as u8 };
     Color::Rgb(lerp(ar, br), lerp(ag, bg), lerp(ab, bb))
+}
+
+/// Dress a row of spans as the current speak target: a phosphor bar in the left
+/// gutter, a soft teal-dark wash under the text, and a closing ♪ marking "Space
+/// speaks this line". Unselected rows get the same two-column gutter so text
+/// doesn't shift when the cursor moves. The bar + note + wash are structural
+/// cues — the selection never rides on hue alone.
+fn speak_row(spans: Vec<Span<'_>>, selected: bool) -> Vec<Span<'_>> {
+    if !selected {
+        let mut out = Vec::with_capacity(spans.len() + 1);
+        out.push(Span::raw("  "));
+        out.extend(spans);
+        return out;
+    }
+    let mut out = Vec::with_capacity(spans.len() + 2);
+    out.push(Span::styled(
+        "▎ ",
+        Style::default()
+            .fg(CURRENT)
+            .bg(SPEAK_BG)
+            .add_modifier(Modifier::BOLD),
+    ));
+    for mut s in spans {
+        s.style = s.style.bg(SPEAK_BG);
+        out.push(s);
+    }
+    out.push(Span::styled(
+        "  ♪",
+        Style::default().fg(CURRENT).bg(SPEAK_BG),
+    ));
+    out
 }
 
 /// The current spinner glyph, advanced off the animation clock (~11 fps).
@@ -60,8 +91,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_card(frame, chunks[1], app);
     }
     render_keybar(frame, chunks[2], app);
-    render_ask(frame, area, app);
-    render_derive_chat(frame, area, app);
+    render_chat(frame, area, app);
     render_constellation(frame, area, app);
     settings::render(frame, area, app);
     super::cmdmenu::render(frame, area, app);
@@ -198,66 +228,19 @@ fn render_constellation(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// The Socratic 辨析 popup, drawn over everything when active. The answer is
-/// markdown (DeepSeek emits **bold** and `-` lists), so we parse it to styled
-/// ratatui text rather than printing the raw syntax.
-fn render_ask(frame: &mut Frame, area: Rect, app: &App) {
-    let plain = |s: &str| Line::from(Span::styled(s.to_string(), Style::default().fg(FOAM)));
-    let (title, color, mut lines) = match &app.ask {
-        Ask::Idle => return,
-        Ask::Pending => (
-            "苏格拉底",
-            MUTED,
-            vec![Line::from(vec![
-                Span::styled(format!("{} ", spin(app)), Style::default().fg(CURRENT)),
-                Span::styled(
-                    "让 DeepSeek 帮你把它和易混词的分别想清楚……",
-                    Style::default().fg(FOAM_DIM),
-                ),
-            ])],
-        ),
-        Ask::Answer(t) => ("苏格拉底 · 辨析", CURRENT, tui_markdown::from_str(t).lines),
-        Ask::Failed(e) => ("辨析失败", CORAL, vec![plain(e)]),
-    };
-    lines.push(Line::raw(""));
-    // ↑↓ only scrolls an Answer — advertising it during Pending would be a lie.
-    let hint = if matches!(&app.ask, Ask::Answer(_)) {
-        "a / Esc 关闭  ·  ↑↓ 滚动"
-    } else {
-        "a / Esc 关闭"
-    };
-    lines.push(Line::from(Span::styled(hint, Style::default().fg(MUTED))));
-
-    let popup = centered_rect(72, 72, area);
-    frame.render_widget(Clear, popup);
-    let block = Block::new()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(color))
-        .title(format!(" {title} "))
-        .title_style(Style::default().fg(color).add_modifier(Modifier::BOLD))
-        // Base style so unstyled markdown text is readable; bold/headings layer on top.
-        .style(Style::default().bg(SLATE).fg(FOAM))
-        .padding(Padding::new(2, 2, 1, 1));
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false })
-            .scroll((app.ask_scroll() as u16, 0)),
-        popup,
-    );
-}
-
-/// The derivation chat popup (Phase A "拆"): a multi-turn conversation with the LLM
-/// where the learner guesses the word's meaning from its morphemes and gets Socratic
-/// guidance. Shows the conversation history (scrollable) + an input line at the bottom.
-fn render_derive_chat(frame: &mut Frame, area: Rect, app: &App) {
-    if app.derive == DeriveState::Closed {
+/// The AI chat popup — one overlay, two modes. Derive (pre-reveal): the learner
+/// guesses the word's meaning from its morphemes and gets Socratic guidance.
+/// Compare (post-reveal): the model opens with the confusable contrast and the
+/// learner digs in. Conversation history (scrollable, bottom-pinned) + an input
+/// line + a voice-toggle indicator.
+fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
+    if app.chat == ChatState::Closed {
         return;
     }
     let mut lines: Vec<Line> = Vec::new();
 
     // Conversation history — each turn labeled by role.
-    for turn in &app.derive_turns {
+    for turn in &app.chat_turns {
         if turn.is_user {
             lines.push(Line::from(vec![
                 Span::styled("你  ", Style::default().fg(CURRENT)),
@@ -275,14 +258,18 @@ fn render_derive_chat(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // Input line or pending spinner.
-    if app.derive == DeriveState::Pending {
+    if app.chat == ChatState::Pending {
         lines.push(Line::from(vec![
             Span::styled(format!("{} ", spin(app)), Style::default().fg(CURRENT)),
             Span::styled("思考中……", Style::default().fg(FOAM_DIM)),
         ]));
     } else {
+        let placeholder = match app.chat_mode {
+            ChatMode::Derive => "说说你看到了哪些词素……",
+            ChatMode::Compare => "追问，或说说你的理解……",
+        };
         let input_span = if app.input.is_empty() {
-            Span::styled("说说你看到了哪些词素……", Style::default().fg(MUTED))
+            Span::styled(placeholder, Style::default().fg(MUTED))
         } else {
             Span::styled(app.input.clone(), Style::default().fg(FOAM))
         };
@@ -293,56 +280,84 @@ fn render_derive_chat(frame: &mut Frame, area: Rect, app: &App) {
         ]));
     }
 
-    // Footer — honest per state: while Pending there is nothing to send.
+    // Footer — honest per state: while Pending there is nothing to send. The voice
+    // toggle reads as part of the frame's contract, colored by its state.
     lines.push(Line::raw(""));
-    let footer = if app.derive == DeriveState::Pending {
-        "Esc 收起（回复就绪会提示） · ↑↓ 滚动"
+    let footer = if app.chat == ChatState::Pending {
+        "Esc 收起(保留) · ↑↓ 滚动 · "
     } else {
-        "Enter 发送 · Esc 收起（对话保留） · ↑↓ 滚动"
+        "Enter 发送 · Esc 收起(保留) · ↑↓ 滚动 · "
     };
-    lines.push(Line::from(Span::styled(
-        footer,
-        Style::default().fg(MUTED),
-    )));
+    let (voice_label, voice_color) = if app.chat_speak {
+        ("♪ 朗读开 Tab", CURRENT)
+    } else {
+        ("♪ 朗读关 Tab", MUTED)
+    };
+    lines.push(Line::from(vec![
+        Span::styled(footer, Style::default().fg(MUTED)),
+        Span::styled(voice_label, Style::default().fg(voice_color)),
+    ]));
 
+    let title = match app.chat_mode {
+        ChatMode::Derive => " 推导 · 和 AI 一起拆词 ",
+        ChatMode::Compare => " 辨析 · 和 AI 分清易混词 ",
+    };
     let popup = centered_rect(72, 72, area);
 
     // Pin the view to the BOTTOM: the newest reply and the input line are the live
-    // edge of a chat, so `derive_scroll` counts rows up from the bottom (0 = pinned)
-    // and we convert it into a top offset here. Wrapped-row counts are estimated
-    // (ASCII = 1 col, everything else = 2) — a small over-estimate only leaves a
-    // blank line above, never hides the input.
+    // edge of a chat, so `chat_scroll` counts rows up from the bottom (0 = pinned).
+    // We wrap the lines OURSELVES (`wrap_line`) and render the exact visible slice —
+    // Paragraph's word wrap produces an unpredictable row count, and any estimate
+    // error here is the input line drifting off-screen.
     let inner_w = popup.width.saturating_sub(2 + 4).max(8) as usize; // borders + l/r padding
-    let inner_h = popup.height.saturating_sub(2 + 2) as usize; // borders + t/b padding
-    let row_count = |l: &Line| -> usize {
-        let cols: usize = l
-            .spans
-            .iter()
-            .flat_map(|s| s.content.chars())
-            .map(|c| if c.is_ascii() { 1 } else { 2 })
-            .sum();
-        cols.max(1).div_ceil(inner_w)
-    };
-    let total_rows: usize = lines.iter().map(row_count).sum();
-    let offset = total_rows
-        .saturating_sub(inner_h)
-        .saturating_sub(app.derive_scroll);
+    let inner_h = popup.height.saturating_sub(2 + 2).max(1) as usize; // borders + t/b padding
+    let rows: Vec<Line> = lines.iter().flat_map(|l| wrap_line(l, inner_w)).collect();
+    let max_scroll = rows.len().saturating_sub(inner_h);
+    let scroll = app.chat_scroll.min(max_scroll);
+    let start = rows.len().saturating_sub(inner_h + scroll);
+    let visible: Vec<Line> = rows[start..].iter().take(inner_h).cloned().collect();
 
     frame.render_widget(Clear, popup);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(CURRENT))
-        .title(" 推导 · 和 AI 一起拆词 ")
+        .title(title)
         .title_style(Style::default().fg(CURRENT).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(SLATE).fg(FOAM))
         .padding(Padding::new(2, 2, 1, 1));
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false })
-            .scroll((offset as u16, 0)),
-        popup,
-    );
+    frame.render_widget(Paragraph::new(visible).block(block), popup);
+}
+
+/// Greedy display-width wrap of one styled line into rows of at most `width` columns
+/// (ASCII = 1 col, everything else = 2). Character-level breaking: predictable row
+/// counts are what the chat's bottom-pinned scroll needs, and CJK text wraps at the
+/// character anyway. Styles survive the split.
+fn wrap_line<'a>(line: &Line<'a>, width: usize) -> Vec<Line<'a>> {
+    let width = width.max(4);
+    let mut rows: Vec<Line> = Vec::new();
+    let mut cur: Vec<Span> = Vec::new();
+    let mut cur_w = 0usize;
+    for span in &line.spans {
+        let style = span.style;
+        let mut buf = String::new();
+        for ch in span.content.chars() {
+            let w = if ch.is_ascii() { 1 } else { 2 };
+            if cur_w + w > width {
+                if !buf.is_empty() {
+                    cur.push(Span::styled(std::mem::take(&mut buf), style));
+                }
+                rows.push(Line::from(std::mem::take(&mut cur)));
+                cur_w = 0;
+            }
+            buf.push(ch);
+            cur_w += w;
+        }
+        if !buf.is_empty() {
+            cur.push(Span::styled(buf, style));
+        }
+    }
+    rows.push(Line::from(cur));
+    rows
 }
 
 fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
@@ -433,23 +448,10 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::raw(""));
 
     // headword + IPA
-    let speak_mark = if c.stage == Stage::Revealed && c.speak_cursor == 0 {
-        Span::styled(
-            "▸ ",
-            Style::default()
-                .fg(CURRENT)
-                .add_modifier(Modifier::REVERSED),
-        )
-    } else {
-        Span::raw("  ")
-    };
-    let mut head = vec![
-        speak_mark,
-        Span::styled(
-            &c.entry.word,
-            Style::default().fg(FOAM).add_modifier(Modifier::BOLD),
-        ),
-    ];
+    let mut head = vec![Span::styled(
+        &c.entry.word,
+        Style::default().fg(FOAM).add_modifier(Modifier::BOLD),
+    )];
     if !c.entry.phonetic.is_empty() {
         head.push(Span::styled(
             format!("   /{}/", c.entry.phonetic),
@@ -469,7 +471,8 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(tc),
             ));
         }
-    lines.push(Line::from(head));
+    let selected = c.stage == Stage::Revealed && c.speak_cursor == 0;
+    lines.push(Line::from(speak_row(head, selected)));
     lines.push(Line::raw(""));
 
     // Morphemes you've already "earned" (encountered in a learned sibling) light
@@ -505,12 +508,12 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // Derive chat hint (Phase A Prompt): invite the learner to chat with the LLM
-    // about the derivation. The chat itself opens via `a` (see render_derive_chat).
+    // about the derivation. The chat itself opens via `a` (see render_chat).
     // A collapsed-but-alive conversation changes the invitation to a resumption —
     // the learner should know their thread is still there.
     if c.is_new && matches!(c.stage, Stage::Prompt) {
         lines.push(Line::raw(""));
-        if app.derive_turns.is_empty() {
+        if app.chat_turns.is_empty() {
             lines.push(Line::from(vec![
                 Span::styled("想拆词？按 ", Style::default().fg(MUTED)),
                 Span::styled("a", Style::default().fg(CURRENT)),
@@ -521,7 +524,7 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled("按 ", Style::default().fg(MUTED)),
                 Span::styled("a", Style::default().fg(CURRENT)),
                 Span::styled(
-                    format!(" 继续推导对话（已 {} 条）", app.derive_turns.len()),
+                    format!(" 继续推导对话（已 {} 条）", app.chat_turns.len()),
                     Style::default().fg(MUTED),
                 ),
             ]));
@@ -815,22 +818,12 @@ fn derivation_reveal(
         if ex.en.is_empty() || shown >= 2 {
             continue;
         }
-        let speak_mark = if speak_cursor == shown + 1 {
-            Span::styled(
-                "▸ ",
-                Style::default()
-                    .fg(CURRENT)
-                    .add_modifier(Modifier::REVERSED),
-            )
-        } else {
-            Span::raw("  ")
-        };
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            speak_mark,
+        let row = vec![
             Span::styled("例  ", Style::default().fg(MUTED)),
             Span::styled(ex.en.clone(), Style::default().fg(FOAM)),
-        ]));
+        ];
+        lines.push(Line::raw(""));
+        lines.push(Line::from(speak_row(row, speak_cursor == shown + 1)));
         if !ex.zh.is_empty() {
             lines.push(Line::from(Span::styled(
                 format!("    {}", ex.zh),
@@ -951,16 +944,22 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
         .as_ref()
         .map(|c| c.strike)
         .unwrap_or(Strike::Idle);
-    let mut spans = if app.derive != DeriveState::Closed {
+    let mut spans = if app.chat != ChatState::Closed {
         // Chat input owns the keyboard — the base shortcuts underneath are dead,
         // so showing them would be a lie. Mirror the popup's footer.
-        if app.derive == DeriveState::Pending {
-            vec![key("↑↓", "滚动", MUTED), key("Esc", "收起", MUTED)]
+        let voice = key(
+            "Tab",
+            if app.chat_speak { "朗读开" } else { "朗读关" },
+            if app.chat_speak { CURRENT } else { MUTED },
+        );
+        if app.chat == ChatState::Pending {
+            vec![key("↑↓", "滚动", MUTED), voice, key("Esc", "收起", MUTED)]
         } else {
             vec![
                 key("Enter", "发送", CURRENT),
                 key("⌫", "删字", MUTED),
                 key("↑↓", "滚动", MUTED),
+                voice,
                 key("Esc", "收起", MUTED),
             ]
         }
@@ -1054,7 +1053,7 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
     // The undo window is 3 seconds and invisible — surface it. The chip appears
     // right after a grade (on the next card / done screen) and vanishes when the
     // window closes, which IS the affordance: see it, and `u` still works.
-    if app.can_undo() && strike == Strike::Idle && app.derive == DeriveState::Closed {
+    if app.can_undo() && strike == Strike::Idle && app.chat == ChatState::Closed {
         let at = spans.len().saturating_sub(1);
         spans.insert(at, key("u", "撤销", AMBER));
     }
@@ -1160,7 +1159,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
             ("Enter", "揭示（新词：从拆到联；复习：从问到答）"),
             (
                 "↑↓",
-                "揭示后选读目标（单词 / 例句）；星座内导航；辨析弹窗滚动",
+                "揭示后选读目标（单词 / 例句）；星座内导航；对话/帮助滚动",
             ),
             ("Tab", "打开命令菜单（↑↓ 选择，Enter 确认，字母直达）"),
             (
@@ -1174,12 +1173,13 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
         &[
             ("Space", "朗读当前选中项（单词或例句），只走绑定耳机"),
             ("s", "打开 TTS 引擎设置（Kokoro/Matcha/Piper 运行时切换）"),
+            ("Tab(对话内)", "切换 AI 回复朗读（中英混合语音，需下载模型）"),
         ],
     ));
     lines.extend(group(
-        "FSRS 评分（揭示后）",
+        "FSRS 评分（揭示后，给当前这张卡打分）",
         &[
-            ("1 / h ✗ Again", "忘了 — 重置，很快再考（~1分）"),
+            ("1 / h ✗ Again", "忘了 — 重置，很快再考"),
             ("2 / j △ Hard", "勉强 — 拉长间隔但标记吃力"),
             ("3 / k ○ Good", "记得 — 正常推进（默认节奏）"),
             ("4 / l ✦ Easy", "轻松 — 大幅拉长间隔"),
@@ -1187,37 +1187,53 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
         ],
     ));
     lines.extend(group(
-        "星火接线",
+        "星火接线（自动出现，给已学的旧词加一次复习）",
         &[
-            ("Space", "翻牌：揭示锚点词（已学同根词）"),
-            ("y", "记得 — 召回成功，刷新锚点"),
-            ("n", "想不起 — 记一次 lapse，诚实标注"),
-            ("Esc", "跳过这次接线（不评分，继续评新词）"),
+            (
+                "触发",
+                "新词揭示后，若它与某个已学过的词共享词根，卡片上自动出现；刚开始学、还没有已学同根词时不会出现",
+            ),
+            ("Space", "翻牌：揭示那个已学的锚点词"),
+            ("y / n", "记得 / 想不起 — 给旧词记一次真实 FSRS 复习（翻牌后生效）"),
+            ("Esc", "跳过这次接线（旧词不评分，直接评新词）"),
         ],
     ));
     lines.extend(group(
         "扩展",
         &[
-            ("a", "新词未揭示：和 AI 一起推导；揭示后与复习：苏格拉底辨析"),
+            ("a", "新词未揭示：和 AI 一起推导；揭示后与复习：AI 辨析对话"),
             ("w", "打开 Wiktionary 词源页"),
             ("g", "星座：当前词的词根家族（已学同根 + 一根之差的前沿）"),
-            ("?", "本帮助（Esc/? 关闭，其他键穿透到下层）"),
+            ("?", "本帮助（↑↓ 滚动，Esc/? 关闭，其他键穿透到下层）"),
         ],
     ));
 
     let popup = centered_rect(72, 78, area);
+    // Exact-slice scrolling (same wrap as the chat popup): the reference outgrows a
+    // 24-row terminal, and Paragraph-side wrap would make the clamp a guess.
+    let inner_w = popup.width.saturating_sub(2 + 4).max(8) as usize;
+    let inner_h = popup.height.saturating_sub(2 + 2).max(1) as usize;
+    let rows: Vec<Line> = lines.iter().flat_map(|l| wrap_line(l, inner_w)).collect();
+    let max_scroll = rows.len().saturating_sub(inner_h);
+    let scroll = app.help_scroll.min(max_scroll);
+    let mut visible: Vec<Line> = rows[scroll..].iter().take(inner_h).cloned().collect();
+    // Overflow indicator on the last visible row — an invisible tail reads as "that's
+    // all" without it.
+    if scroll < max_scroll
+        && let Some(last) = visible.last_mut()
+    {
+        *last = Line::from(Span::styled(
+            "   ⌄ ↓ 更多",
+            Style::default().fg(CURRENT),
+        ));
+    }
     frame.render_widget(Clear, popup);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(CURRENT))
-        .title(" ? 帮助 · Esc/? 关闭 ")
+        .title(" ? 帮助 · ↑↓ 滚动 · Esc/? 关闭 ")
         .title_style(Style::default().fg(CURRENT).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(SLATE).fg(FOAM))
         .padding(Padding::new(2, 2, 1, 1));
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        popup,
-    );
+    frame.render_widget(Paragraph::new(visible).block(block), popup);
 }
