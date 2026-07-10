@@ -82,13 +82,20 @@ pub fn default_output_name() -> Option<String> {
         .and_then(|d| device_name(&d))
 }
 
-/// Find a cpal *output* device by case-insensitive name substring.
+/// Find a cpal *output* device by name — exact (case-insensitive) match first, then
+/// substring. The gate validates a specific device and hands its full name to the
+/// open path; preferring the exact name keeps "device validated" and "device opened"
+/// the same one when several outputs share a substring (e.g. an HFP/A2DP pair).
 pub fn find_output_device(needle: &str) -> Option<cpal::Device> {
     let needle = needle.to_lowercase();
     let host = cpal::default_host();
-    host.output_devices().ok()?.find(|d| {
-        device_name(d)
-            .map(|n| n.to_lowercase().contains(&needle))
-            .unwrap_or(false)
-    })
+    let devices: Vec<cpal::Device> = host.output_devices().ok()?.collect();
+    let name_of = |d: &cpal::Device| device_name(d).map(|n| n.to_lowercase());
+    if let Some(pos) = devices.iter().position(|d| name_of(d) == Some(needle.clone())) {
+        return devices.into_iter().nth(pos);
+    }
+    let pos = devices
+        .iter()
+        .position(|d| name_of(d).map(|n| n.contains(&needle)).unwrap_or(false))?;
+    devices.into_iter().nth(pos)
 }

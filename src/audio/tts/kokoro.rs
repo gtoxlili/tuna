@@ -40,13 +40,28 @@ impl KokoroEngine {
 
 impl super::TtsEngine for KokoroEngine {
     fn voices(&self) -> Vec<Voice> {
-        // sherpa's kokoro example synthesizes with sid=0, which is af_heart in the
-        // bundled voices.bin. Additional voices can be surfaced once their sid order
-        // is confirmed against the actual voices.bin shipped in the tarball.
-        vec![Voice {
-            id: "af_heart".into(),
-            sid: 0,
-        }]
+        // kokoro-en-v0_19 ships 11 speakers; sid order per the sherpa model docs.
+        // (`af_heart` is a Kokoro v1.0 voice — it does not exist in this export.)
+        const IDS: [&str; 11] = [
+            "af",
+            "af_bella",
+            "af_nicole",
+            "af_sarah",
+            "af_sky",
+            "am_adam",
+            "am_michael",
+            "bf_emma",
+            "bf_isabella",
+            "bm_george",
+            "bm_lewis",
+        ];
+        IDS.iter()
+            .enumerate()
+            .map(|(i, id)| Voice {
+                id: (*id).into(),
+                sid: i as i32,
+            })
+            .collect()
     }
 
     fn default_voice(&self) -> Voice {

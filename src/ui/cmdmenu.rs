@@ -12,7 +12,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
 
-use super::app::App;
+use super::app::{App, Stage};
 use super::theme::*;
 
 /// The runtime menu state: open flag + cursor index.
@@ -33,29 +33,55 @@ pub struct CommandItem {
 }
 
 impl CommandMenu {
-    /// Build the live command list for the current app state. The set is small and
-    /// fixed; the only dynamic bit is whether 撤销评分 is selectable (needs a fresh
-    /// grade within the 3s undo window).
+    /// Build the live command list for the current app state. Enabled mirrors the
+    /// base key gates exactly — a row must not sit bright when its command would
+    /// no-op (done state has no word to 辨析), and must not offer a spoiler the
+    /// direct key deliberately withholds (词源/星座 stay dark until the reveal, so
+    /// the recall isn't answered by a menu detour).
     pub fn items(&self, app: &App) -> Vec<CommandItem> {
         let undo_enabled = app.can_undo();
+        let (is_new_prompt, revealed) = app
+            .current
+            .as_ref()
+            .map(|c| {
+                (
+                    c.is_new && c.stage == Stage::Prompt,
+                    c.stage == Stage::Revealed,
+                )
+            })
+            .unwrap_or((false, false));
         vec![
             CommandItem {
                 label: "辨析",
-                hint: "苏格拉底辨析（易混词对照）",
+                hint: if is_new_prompt {
+                    "和 AI 一起推导这个词"
+                } else if revealed {
+                    "苏格拉底辨析（易混词对照）"
+                } else {
+                    "揭示后可用"
+                },
                 shortcut: "a",
-                enabled: true,
+                enabled: is_new_prompt || revealed,
             },
             CommandItem {
                 label: "词源",
-                hint: "打开 Wiktionary 词源页",
+                hint: if revealed {
+                    "打开 Wiktionary 词源页"
+                } else {
+                    "揭示后可用（先自己推）"
+                },
                 shortcut: "w",
-                enabled: true,
+                enabled: revealed,
             },
             CommandItem {
                 label: "星座",
-                hint: "当前词的词根家族",
+                hint: if revealed {
+                    "当前词的词根家族"
+                } else {
+                    "揭示后可用（先自己推）"
+                },
                 shortcut: "g",
-                enabled: true,
+                enabled: revealed,
             },
             CommandItem {
                 label: "设置",

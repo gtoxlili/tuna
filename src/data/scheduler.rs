@@ -8,19 +8,11 @@
 use chrono::{DateTime, Utc};
 use rs_fsrs::{Card, FSRS, Rating, RecordLog, SchedulingInfo};
 
+#[derive(Default)]
 pub struct Scheduler {
     fsrs: FSRS,
 }
 
-impl Default for Scheduler {
-    fn default() -> Self {
-        // Default FSRS-4.5 weights + 0.9 target retention. Personal weights get
-        // fitted offline once enough review history accrues (M5).
-        Self {
-            fsrs: FSRS::default(),
-        }
-    }
-}
 
 impl Scheduler {
     /// Apply a rating at `now`, returning the next card state + the review log entry.

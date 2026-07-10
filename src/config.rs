@@ -10,6 +10,7 @@ use crate::paths;
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     pub deepseek: DeepSeekCfg,
     pub gate: GateCfg,
@@ -45,20 +46,11 @@ pub struct TtsCfg {
 /// where animation flicker is unwelcome.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct A11yCfg {
     pub reduced_motion: bool,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            deepseek: DeepSeekCfg::default(),
-            gate: GateCfg::default(),
-            tts: TtsCfg::default(),
-            a11y: A11yCfg::default(),
-        }
-    }
-}
 impl Default for DeepSeekCfg {
     fn default() -> Self {
         Self {
@@ -80,15 +72,11 @@ impl Default for TtsCfg {
     fn default() -> Self {
         Self {
             engine: "kokoro".to_string(),
-            voice: "af_heart".to_string(),
+            // sid 0 of kokoro-en-v0_19 — "af_heart" belongs to Kokoro v1.0 and does
+            // not exist in this export; an unknown name silently falls back to sid 0
+            // anyway, so the honest default is the real sid-0 name.
+            voice: "af".to_string(),
             speed: 1.0,
-        }
-    }
-}
-impl Default for A11yCfg {
-    fn default() -> Self {
-        Self {
-            reduced_motion: false,
         }
     }
 }
@@ -100,11 +88,10 @@ impl Config {
         } else {
             Config::default()
         };
-        if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
-            if !key.is_empty() {
+        if let Ok(key) = std::env::var("DEEPSEEK_API_KEY")
+            && !key.is_empty() {
                 cfg.deepseek.api_key = key;
             }
-        }
         Ok(cfg)
     }
 
@@ -140,14 +127,23 @@ pub fn update_tts(engine: &str, voice: &str) -> Result<()> {
     let mut found_engine = false;
     let mut found_voice = false;
     let mut out = String::with_capacity(content.len());
+    // Match on the trimmed key before '=' — `starts_with("engine")` would miss a
+    // legally-indented `  engine = …` and false-match any future `engine_*` key.
+    let key_of = |line: &str| -> Option<String> {
+        let t = line.trim_start();
+        t.split_once('=')
+            .map(|(k, _)| k.trim().to_string())
+            .filter(|k| !k.is_empty() && !t.starts_with('#'))
+    };
     for line in content.lines() {
-        if line.starts_with('[') {
+        if line.trim_start().starts_with('[') {
             in_tts = line.trim() == "[tts]";
         }
-        if in_tts && line.starts_with("engine") {
+        let key = key_of(line);
+        if in_tts && key.as_deref() == Some("engine") {
             out.push_str(&format!("engine = \"{engine}\"\n"));
             found_engine = true;
-        } else if in_tts && line.starts_with("voice") {
+        } else if in_tts && key.as_deref() == Some("voice") {
             out.push_str(&format!("voice = \"{voice}\"\n"));
             found_voice = true;
         } else {
@@ -179,8 +175,10 @@ needle = "airpods"
 
 [tts]
 # engine = kokoro | matcha | piper（运行时按 s 打开设置切换）
+# kokoro 音色: af af_bella af_nicole af_sarah af_sky am_adam am_michael
+#              bf_emma bf_isabella bm_george bm_lewis
 engine = "kokoro"
-voice = "af_heart"
+voice = "af"
 speed = 1.0
 
 [a11y]

@@ -14,19 +14,12 @@ use super::theme::*;
 use crate::audio::tts::{TtsEngineKind, from_kind};
 use crate::paths;
 
+#[derive(Default)]
 pub struct Settings {
     pub open: bool,
     pub cursor: usize,
 }
 
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            open: false,
-            cursor: 0,
-        }
-    }
-}
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     if !app.settings.open {

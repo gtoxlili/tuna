@@ -24,8 +24,16 @@ use audio::player::{self, RoutedPlayer};
 use audio::probe;
 use data::Deck;
 
+/// Release builds inject the resolved CI tag (e.g. "0.1.157") via `TUNA_VERSION` at
+/// compile time, so `tuna --version` matches the GitHub/Homebrew version instead of
+/// the static Cargo.toml placeholder. Dev builds fall back to Cargo.toml.
+const VERSION: &str = match option_env!("TUNA_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 #[derive(Parser)]
-#[command(name = "tuna", version, about = "考研英语 · 词根推导终端")]
+#[command(name = "tuna", version = VERSION, about = "考研英语 · 词根推导终端")]
 struct Cli {
     /// No subcommand starts a study session; first run bootstraps ~/.tuna.
     #[command(subcommand)]
@@ -352,8 +360,8 @@ fn probe() -> Result<()> {
     let devices = probe::current_probe().enumerate()?;
     println!("\n  audio devices ({} total)\n", devices.len());
     println!(
-        "  {:<3} {:<28} {:<14} {:>7} {:<7} {}",
-        "", "name", "transport", "out", "default", "stable_id"
+        "  {:<3} {:<28} {:<14} {:>7} {:<7} stable_id",
+        "", "name", "transport", "out", "default"
     );
     println!("  {}", "─".repeat(88));
     for d in &devices {
@@ -399,7 +407,22 @@ fn gate_test(needle: &str) -> Result<()> {
     println!("  system default output : {default_name}");
 
     let Some(bound) = probe::find_bound_output(&devices, needle) else {
-        println!("\n  ✗ GATE CLOSED — no output device matches \"{needle}\".");
+        println!("\n  ✗ GATE CLOSED — no output device passes the gate for \"{needle}\".");
+        // Explain a near-miss: a device that matches by name but is refused by the
+        // gate policy (non-bluetooth on macOS, or an always-present virtual sink).
+        if let Some(near) = probe::find_output_by_name(&devices, needle) {
+            let why = if near.is_ungateable() {
+                "an always-present virtual sink — it can never close, so it can't gate"
+            } else {
+                "not bluetooth-class — on macOS the gate only opens on bluetooth"
+            };
+            println!(
+                "    note: \"{}\" [{}] matches the name but is {}.",
+                near.name,
+                near.transport_label(),
+                why
+            );
+        }
         println!("    → holding silence (fail-closed). Nothing played through any speaker.\n");
         return Ok(());
     };

@@ -24,17 +24,26 @@ pub fn socratic(client: &DeepSeek, model: &str, word: &str, context: &str) -> Re
 pub const DERIVE_CHAT_SYSTEM: &str = "你是词根推导游戏的引导者。学习者正在尝试推导一个新词的意思，你会收到词、它已核验的真实词素和含义。规则：绝不直接说出正确词义；如果学习者方向正确，肯定他抓对的词素；如果有偏差，用一个提问引导他关注被忽略的词素；每次只回复 1-3 句，像对话一样自然；用中文。";
 
 /// Continue a multi-turn derivation chat. Builds the full message history (system +
-/// prior turns + new user message) and sends it to the LLM.
+/// prior turns + new user message) and sends it to the LLM. `meaning` is the verified
+/// gloss — the system prompt promises the model the ground-truth meaning (it must
+/// guide toward it without blurting it); withholding it would leave the model
+/// inventing its own "correct answer" and confidently steering the learner wrong.
 pub fn derive_chat(
     client: &DeepSeek,
     model: &str,
     word: &str,
     morphemes: &str,
+    meaning: &str,
     turns: &[(bool, String)], // (is_user, text)
     new_message: &str,
 ) -> Result<String> {
     let mut messages: Vec<(&str, String)> = vec![("system", DERIVE_CHAT_SYSTEM.to_string())];
-    let info = format!("目标词: {word}\n已核验词素: {morphemes}");
+    let morphemes_line = if morphemes.is_empty() {
+        "（此词无清晰词素分解，引导学习者从词形联想与语境猜测）".to_string()
+    } else {
+        morphemes.to_string()
+    };
+    let info = format!("目标词: {word}\n已核验词素: {morphemes_line}\n真实含义（仅供引导，绝不直说）: {meaning}");
     messages.push(("user", info));
     messages.push((
         "assistant",

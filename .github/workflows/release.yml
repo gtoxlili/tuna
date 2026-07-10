@@ -52,6 +52,8 @@ jobs:
       contents: write
     outputs:
       tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      proceed: ${{ steps.push.outputs.proceed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -85,16 +87,30 @@ jobs:
           TAG="v${MAJOR_MINOR}.${COUNT}"
           echo "Resolved tag: ${TAG}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Push tag if new
+        id: push
         shell: bash
         run: |
           set -euo pipefail
           TAG='${{ steps.version.outputs.tag }}'
-          # Idempotent: a re-run on the same commit finds the tag already on origin
-          # and skips instead of failing the push.
-          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q .; then
-              echo "::notice::tag ${TAG} already on origin; re-run on same commit, skipping push"
+          EXISTING=$(git ls-remote --tags origin "refs/tags/${TAG}^{}" "refs/tags/${TAG}" | awk '{print $1}' | tail -n1 || true)
+          if [ -n "$EXISTING" ]; then
+              # The tag exists. Same commit ⇒ an idempotent re-run: proceed so a
+              # failed build can be retried. DIFFERENT commit ⇒ hard stop: the paths
+              # that trigger this workflow and the paths that count the version are
+              # not identical (e.g. a workflow-file-only push), and rebuilding an
+              # existing version from a newer commit would clobber the published
+              # artifacts — breaking every Homebrew formula sha256 that pins them.
+              RESOLVED=$(git rev-parse "${TAG}^{commit}" 2>/dev/null || echo "$EXISTING")
+              if [ "$RESOLVED" = "$GITHUB_SHA" ]; then
+                  echo "::notice::tag ${TAG} already on origin at this commit; re-run, proceeding"
+                  echo "proceed=true" >> "$GITHUB_OUTPUT"
+              else
+                  echo "::notice::tag ${TAG} exists at ${RESOLVED} ≠ ${GITHUB_SHA}; version unchanged by this push — skipping build/release to protect published artifacts"
+                  echo "proceed=false" >> "$GITHUB_OUTPUT"
+              fi
               exit 0
           fi
           git config user.name  'github-actions[bot]'
@@ -102,11 +118,14 @@ jobs:
           git tag -a "${TAG}" -m "Auto-tag ${TAG} at ${GITHUB_SHA}"
           git push origin "${TAG}"
           echo "::notice::pushed tag ${TAG}"
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
 
   build:
     name: build (${{ matrix.target }})
     needs: tag
+    if: needs.tag.outputs.proceed == 'true'
     runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -126,12 +145,16 @@ jobs:
             archive: tar.gz
             rustflags: ''
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-22.04
+            # The ubuntu-22.04 runner retires 2026-10; building inside an
+            # ubuntu:22.04 container on the 24.04 runner keeps the deliberate
+            # glibc-2.35 floor (Ubuntu 22.04 / Debian 12 users) past that date.
+            runner: ubuntu-24.04
+            container: 'ubuntu:22.04'
             archive: tar.gz
-            # config.toml uses mold + x86-64-v3; mold isn't on the stock ubuntu runner.
-            # Drop the linker flag, keep the portable x86-64-v3 baseline (AVX2-era).
-            # The binary dynamically links libstdc++.so (sherpa's C++ runtime) —
-            # ubuntu 22.04's glibc 2.35 is a safe floor for most modern distros.
+            # config.toml uses mold + x86-64-v3; mold isn't in the container.
+            # Drop the linker flag, keep the portable x86-64-v3 baseline (AVX2-era,
+            # ~2015+ CPUs — documented in the README download section).
+            # The binary dynamically links libstdc++.so (sherpa's C++ runtime).
             rustflags: '-C target-cpu=x86-64-v3'
           - target: x86_64-pc-windows-msvc
             runner: windows-2022
@@ -144,6 +167,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # The Linux target pulls in alsa-sys (via the audio stack), whose build.rs
+      # needs the ALSA dev headers. The build runs in a bare ubuntu:22.04 container
+      # (root, no sudo), which also needs the base toolchain + curl BEFORE the
+      # rust-toolchain action can bootstrap rustup.
+      - name: install linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          apt-get update
+          apt-get install -y curl ca-certificates git build-essential pkg-config libasound2-dev
 
       - name: install rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -158,15 +191,12 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # The Linux target pulls in alsa-sys (via the audio stack), whose build.rs
-      # needs the ALSA dev headers — not preinstalled on the stock ubuntu runner.
-      - name: install linux system deps
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-
       - name: build release
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
+          # Compiled into `tuna --version` (main.rs option_env!) so the binary
+          # reports the released version, not Cargo.toml's static placeholder.
+          TUNA_VERSION: ${{ needs.tag.outputs.version }}
         run: cargo build --release --target ${{ matrix.target }} --locked
 
       # Package the binary flat (at the archive root) — Homebrew's `bin.install`
@@ -185,7 +215,12 @@ jobs:
           # -C staging so paths are relative to staging (flat, no nesting)
           tar czf "$staging.tar.gz" -C "$staging" tuna README.md LICENSE 2>/dev/null \
             || tar czf "$staging.tar.gz" -C "$staging" tuna
-          shasum -a 256 "$staging.tar.gz" | tee checksums-${{ matrix.target }}.txt
+          # shasum (perl) on macOS; sha256sum (coreutils) in the linux container
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$staging.tar.gz" | tee checksums-${{ matrix.target }}.txt
+          else
+            sha256sum "$staging.tar.gz" | tee checksums-${{ matrix.target }}.txt
+          fi
 
       - name: package (windows)
         if: matrix.archive == 'zip'

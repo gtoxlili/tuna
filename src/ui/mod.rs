@@ -45,12 +45,11 @@ pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
         println!("deck empty — run `tuna build-deck` first");
         return Ok(());
     }
-    if let Some(w) = word {
-        if !app.force_card(&w)? {
+    if let Some(w) = word
+        && !app.force_card(&w)? {
             println!("'{w}' not in deck");
             return Ok(());
         }
-    }
     let mut term = Terminal::new(TestBackend::new(96, 32))?;
 
     term.draw(|f| view::render(f, &app))?;
@@ -97,6 +96,24 @@ pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
     );
     term.draw(|f| view::render(f, &app))?;
     println!("\n── SOCRATIC POPUP (markdown) ──\n{}", term.backend());
+
+    // Verify the derive chat popup: history + input line pinned to the bottom edge.
+    app.ask = app::Ask::Idle;
+    if let Some(c) = app.current.as_mut() {
+        c.stage = app::Stage::Prompt;
+    }
+    app.derive = app::DeriveState::Open;
+    app.derive_turns.push(app::ChatTurn {
+        is_user: true,
+        text: "我看到 spect 是看".to_string(),
+    });
+    app.derive_turns.push(app::ChatTurn {
+        is_user: false,
+        text: "对，spect 抓对了。再看词尾 -ate，它常把词变成什么词性？".to_string(),
+    });
+    app.input = "动词?".to_string();
+    term.draw(|f| view::render(f, &app))?;
+    println!("\n── DERIVE CHAT (input pinned) ──\n{}", term.backend());
     Ok(())
 }
 
@@ -112,13 +129,11 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
         } else {
             Duration::from_millis(200)
         };
-        if event::poll(timeout)? {
-            if let Event::Key(k) = event::read()? {
-                if k.kind == KeyEventKind::Press {
+        if event::poll(timeout)?
+            && let Event::Key(k) = event::read()?
+                && k.kind == KeyEventKind::Press {
                     app.on_key(k)?;
                 }
-            }
-        }
         app.poll_gate();
         app.poll_async();
         if app.should_quit {

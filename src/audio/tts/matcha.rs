@@ -16,12 +16,12 @@ const ACOUSTIC: &str = "model-steps-3.onnx";
 const VOCODER: &str = "hifigan_v2.onnx";
 const TOKENS: &str = "tokens.txt";
 const ESPEAK: &str = "espeak-ng-data";
-const LEXICON: &str = "lexicon.txt";
 
 const TARBALL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-en_US-ljspeech.tar.bz2";
 const VOCODER_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/hifigan_v2.onnx";
-const TARBALL_MB: usize = 220;
+/// Measured: the tarball is 73MB; the standalone hifigan_v2 vocoder ~4MB.
+const TARBALL_MB: usize = 73;
 
 impl MatchaEngine {
     pub fn files(dir: &Path) -> EngineFiles {
@@ -32,7 +32,11 @@ impl MatchaEngine {
             data_dir: root.join(ESPEAK),
             voices: None,
             vocoder: Some(root.join(VOCODER)),
-            lexicon: Some(root.join(LEXICON)),
+            // The en_US-ljspeech tarball ships NO lexicon.txt — G2P runs entirely off
+            // espeak-ng-data. Passing a lexicon path here makes sherpa's Validate()
+            // fail ("lexicon does not exist") and create() return None: Matcha would
+            // be dead on arrival despite a clean install.
+            lexicon: None,
         }
     }
 }
@@ -66,7 +70,7 @@ impl super::TtsEngine for MatchaEngine {
     }
 
     fn footprint_mb(&self) -> usize {
-        TARBALL_MB + 64
+        TARBALL_MB + 4
     }
 
     fn models_present(&self, dir: &Path) -> bool {
@@ -78,6 +82,6 @@ impl super::TtsEngine for MatchaEngine {
     }
 
     fn blurb(&self) -> &'static str {
-        "Matcha-TTS · 条件流匹配范式 · LJSpeech 女声 · ~280MB"
+        "Matcha-TTS · 条件流匹配范式 · LJSpeech 女声 · ~80MB"
     }
 }

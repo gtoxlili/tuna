@@ -220,10 +220,13 @@ fn render_ask(frame: &mut Frame, area: Rect, app: &App) {
         Ask::Failed(e) => ("辨析失败", CORAL, vec![plain(e)]),
     };
     lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        "a / Esc 关闭  ·  ↑↓ 滚动",
-        Style::default().fg(MUTED),
-    )));
+    // ↑↓ only scrolls an Answer — advertising it during Pending would be a lie.
+    let hint = if matches!(&app.ask, Ask::Answer(_)) {
+        "a / Esc 关闭  ·  ↑↓ 滚动"
+    } else {
+        "a / Esc 关闭"
+    };
+    lines.push(Line::from(Span::styled(hint, Style::default().fg(MUTED))));
 
     let popup = centered_rect(72, 72, area);
     frame.render_widget(Clear, popup);
@@ -290,14 +293,41 @@ fn render_derive_chat(frame: &mut Frame, area: Rect, app: &App) {
         ]));
     }
 
-    // Footer.
+    // Footer — honest per state: while Pending there is nothing to send.
     lines.push(Line::raw(""));
+    let footer = if app.derive == DeriveState::Pending {
+        "Esc 收起（回复就绪会提示） · ↑↓ 滚动"
+    } else {
+        "Enter 发送 · Esc 收起（对话保留） · ↑↓ 滚动"
+    };
     lines.push(Line::from(Span::styled(
-        "Enter 发送 · Esc 关闭 · ↑↓ 滚动",
+        footer,
         Style::default().fg(MUTED),
     )));
 
     let popup = centered_rect(72, 72, area);
+
+    // Pin the view to the BOTTOM: the newest reply and the input line are the live
+    // edge of a chat, so `derive_scroll` counts rows up from the bottom (0 = pinned)
+    // and we convert it into a top offset here. Wrapped-row counts are estimated
+    // (ASCII = 1 col, everything else = 2) — a small over-estimate only leaves a
+    // blank line above, never hides the input.
+    let inner_w = popup.width.saturating_sub(2 + 4).max(8) as usize; // borders + l/r padding
+    let inner_h = popup.height.saturating_sub(2 + 2) as usize; // borders + t/b padding
+    let row_count = |l: &Line| -> usize {
+        let cols: usize = l
+            .spans
+            .iter()
+            .flat_map(|s| s.content.chars())
+            .map(|c| if c.is_ascii() { 1 } else { 2 })
+            .sum();
+        cols.max(1).div_ceil(inner_w)
+    };
+    let total_rows: usize = lines.iter().map(row_count).sum();
+    let offset = total_rows
+        .saturating_sub(inner_h)
+        .saturating_sub(app.derive_scroll);
+
     frame.render_widget(Clear, popup);
     let block = Block::new()
         .borders(Borders::ALL)
@@ -310,7 +340,7 @@ fn render_derive_chat(frame: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: false })
-            .scroll((app.derive_scroll as u16, 0)),
+            .scroll((offset as u16, 0)),
         popup,
     );
 }
@@ -350,9 +380,15 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         )
     };
     // Add the card position so the learner can tell "今日已学完" (remaining 0) from
-    // "本次完成" — the count alone didn't distinguish. pos/total reads like 3/15.
+    // "本次完成" — the count alone didn't distinguish. Shown 1-based while a card is
+    // up ("第 3 张" reads 3/15, not 2/15); done pins at total/total.
     let pos_label = if app.session_total > 0 {
-        format!("{}/{}", app.pos.min(app.session_total), app.session_total)
+        let cur = if app.done() {
+            app.session_total
+        } else {
+            (app.pos + 1).min(app.session_total)
+        };
+        format!("{}/{}", cur, app.session_total)
     } else {
         String::new()
     };
@@ -421,8 +457,8 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
     // Frequency chip (from enrichment) — triage effort at a glance.
-    if let Some(en) = &c.enrichment {
-        if !en.freq_tier.is_empty() {
+    if let Some(en) = &c.enrichment
+        && !en.freq_tier.is_empty() {
             let tc = match en.freq_tier.as_str() {
                 "高频" => CORAL,
                 "中频" => AMBER,
@@ -433,7 +469,6 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(tc),
             ));
         }
-    }
     lines.push(Line::from(head));
     lines.push(Line::raw(""));
 
@@ -471,13 +506,26 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
 
     // Derive chat hint (Phase A Prompt): invite the learner to chat with the LLM
     // about the derivation. The chat itself opens via `a` (see render_derive_chat).
+    // A collapsed-but-alive conversation changes the invitation to a resumption —
+    // the learner should know their thread is still there.
     if c.is_new && matches!(c.stage, Stage::Prompt) {
         lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::styled("想拆词？按 ", Style::default().fg(MUTED)),
-            Span::styled("a", Style::default().fg(CURRENT)),
-            Span::styled(" 和 AI 一起推导", Style::default().fg(MUTED)),
-        ]));
+        if app.derive_turns.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("想拆词？按 ", Style::default().fg(MUTED)),
+                Span::styled("a", Style::default().fg(CURRENT)),
+                Span::styled(" 和 AI 一起推导", Style::default().fg(MUTED)),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("按 ", Style::default().fg(MUTED)),
+                Span::styled("a", Style::default().fg(CURRENT)),
+                Span::styled(
+                    format!(" 继续推导对话（已 {} 条）", app.derive_turns.len()),
+                    Style::default().fg(MUTED),
+                ),
+            ]));
+        }
     }
 
     // 星火接线 — after the reveal, EARN the edge by recalling a learned sibling.
@@ -903,8 +951,26 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
         .as_ref()
         .map(|c| c.strike)
         .unwrap_or(Strike::Idle);
-    let spans = if app.done() {
-        vec![key("Esc", "退出", CORAL)]
+    let mut spans = if app.derive != DeriveState::Closed {
+        // Chat input owns the keyboard — the base shortcuts underneath are dead,
+        // so showing them would be a lie. Mirror the popup's footer.
+        if app.derive == DeriveState::Pending {
+            vec![key("↑↓", "滚动", MUTED), key("Esc", "收起", MUTED)]
+        } else {
+            vec![
+                key("Enter", "发送", CURRENT),
+                key("⌫", "删字", MUTED),
+                key("↑↓", "滚动", MUTED),
+                key("Esc", "收起", MUTED),
+            ]
+        }
+    } else if app.done() {
+        // Settings/Tab stay live after the session — surface them.
+        vec![
+            key("s", "设置", MUTED),
+            key("Tab", "命令", MUTED),
+            key("Esc", "退出", CORAL),
+        ]
     } else if strike == Strike::Prompt {
         vec![key("Space", "翻牌", AMBER), key("Esc", "跳过", MUTED)]
     } else if strike == Strike::Flipped {
@@ -975,16 +1041,23 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
                     sep(),
                     key("↑↓", "选读", CURRENT),
                     key("Space", "发音", MUTED),
-                    key("a", "辨析", MUTED),
-                    key("w", "词源", MUTED),
-                    key("g", "星座", MUTED),
-                    key("s", "设置", MUTED),
+                    // The command cluster collapses behind Tab (辨析/词源/星座/设置
+                    // all live in the menu) — four extra letter chips pushed the bar
+                    // past what a glance can parse, and Tab is the discovery surface.
+                    key("Tab", "命令", MUTED),
                     key("?", "帮助", MUTED),
                     key("Esc", "再按退出", MUTED),
                 ]
             }
         }
     };
+    // The undo window is 3 seconds and invisible — surface it. The chip appears
+    // right after a grade (on the next card / done screen) and vanishes when the
+    // window closes, which IS the affordance: see it, and `u` still works.
+    if app.can_undo() && strike == Strike::Idle && app.derive == DeriveState::Closed {
+        let at = spans.len().saturating_sub(1);
+        spans.insert(at, key("u", "撤销", AMBER));
+    }
     let mut flat = Vec::new();
     for group in spans {
         flat.extend(group);
@@ -1110,7 +1183,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
             ("2 / j △ Hard", "勉强 — 拉长间隔但标记吃力"),
             ("3 / k ○ Good", "记得 — 正常推进（默认节奏）"),
             ("4 / l ✦ Easy", "轻松 — 大幅拉长间隔"),
-            ("u", "撤销上次评分（3 秒内，仅限一步）"),
+            ("u", "撤销上次评分（3 秒内一步；星火接线的锚点复习不回滚）"),
         ],
     ));
     lines.extend(group(
@@ -1125,7 +1198,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     lines.extend(group(
         "扩展",
         &[
-            ("a", "新词：和 AI 一起推导（拆词游戏）；复习：苏格拉底辨析"),
+            ("a", "新词未揭示：和 AI 一起推导；揭示后与复习：苏格拉底辨析"),
             ("w", "打开 Wiktionary 词源页"),
             ("g", "星座：当前词的词根家族（已学同根 + 一根之差的前沿）"),
             ("?", "本帮助（Esc/? 关闭，其他键穿透到下层）"),

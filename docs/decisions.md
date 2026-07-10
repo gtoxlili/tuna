@@ -265,3 +265,37 @@ macOS 专属架构,`coreaudio-sys` + `core-foundation` 是无条件依赖,Window
 - overlay scroll(ask/help/graph)— 小终端场景,bounded 内容 deferred。
 - tachyonfx — v1 已决策不引入(版本钉子)。
 
+
+## 全链路对抗审查后的修正(2026-07)
+
+三个并行审查(TTS 链路 / 跨平台音频与发布链路 / multi-turn chat 与 undo)对照代码真相逐条核实后落地:
+
+- **门策略硬化(fail-open 修复)**:`find_bound_output` 排除 ALSA 永在场虚拟 PCM(default/pulse/
+  pipewire/…),它们让门永不关闭、声音被声音服务器路由到扬声器;macOS 上门只对蓝牙类设备开
+  (宽松 needle 如 "air" 不再匹配 "MacBook Air扬声器")。`gate-test` 对被拒的名字近似匹配给出
+  解释。向导候选同规则过滤。
+- **播放设备与验证设备对齐**:`ensure_player` 用门验证过的设备全名开流(精确名优先,子串回退),
+  不再用 needle 重新搜一遍;`play_audio` 播放前强制刷新门状态,关掉 1s 轮询窗口内"对死流报成功"
+  的窗口。
+- **Matcha lexicon 修复**:en_US-ljspeech tarball 不含 lexicon.txt,传该路径使 sherpa Validate 失败、
+  create 返回 None,Matcha 装完即死。改为 lexicon: None(G2P 走 espeak-ng-data)。体积数字改为实测
+  (73MB tarball,非 220MB)。
+- **Kokoro 音色表修正**:kokoro-en-v0_19 是 11 音色(sid 0-10,af…bm_lewis);原代码只暴露不存在的
+  "af_heart"(v1.0 音色),靠 unwrap_or(0) 兜底才工作。默认音色改为真实 sid-0 名 "af"。
+- **解压原子化**:tarball 先解进 staging 再 rename 进位。原直接解包被 Ctrl-C 打断时所有文件在场但
+  末一个截断,models_present(存在性检查)误报已装,合成永远失败且无恢复路径。
+- **setup 重跑保配置**:init_config 从现有 Config 携带 speed/base_url/models/[a11y],向导只覆盖它
+  问过的四个值。原实现整文件重写,reduced_motion 等手调项被静默重置。
+- **undo 完整性**:save_card 传快照的 introduced(原硬编码 true,把撤销的新词永久标成"已引入",
+  下会话按假复习调度);pos 用快照恢复(原 pos-1 在 load_current 跳词后错位)。
+- **推导对话收口**:对话在 Esc 后保留(收起非丢弃,回复到达以 toast 提示,换卡才清);聊天输入
+  独占键盘(Tab 不再在输入中途拉起命令菜单清空草稿);滚动 pin-to-bottom(新回复始终可见);
+  system prompt 承诺的"真实含义"真的随消息发给模型(原来漏发,模型只能自己编一个"正确答案");
+  重发历史截断到最近 12 条。
+- **release 防 clobber**:tag 已存在且指向不同 commit 时硬停(触发路径含 workflow 文件而版本计数
+  不含,workflow-only push 会用新 commit 重建同版本并覆盖已发布产物,击穿 Homebrew sha256);
+  Linux 构建移到 ubuntu-24.04 runner + ubuntu:22.04 容器,22.04 runner 退役(2026-10)后仍保
+  glibc 2.35 地板;`tuna --version` 编译期注入 CI tag(TUNA_VERSION),不再恒报 0.1.0。
+- **cmdmenu enabled 即真相**:菜单行的可用态镜像基础键位门(词源/星座揭示后可用,防剧透;辨析
+  需有当前卡),字母直达也走同一 enabled 门,不再出现"行是灰的但快捷键照发"或"行亮着但按了
+  没反应"。

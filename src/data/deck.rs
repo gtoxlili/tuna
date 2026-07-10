@@ -419,29 +419,20 @@ impl Deck {
 
     pub fn stats(&self) -> Result<DeckStats> {
         let now = Utc::now();
-        let mut s = DeckStats::default();
-        s.words = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM dict", [], |r| r.get(0))?;
-        s.cards = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM card", [], |r| r.get(0))?;
-        s.new = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM card WHERE state = 0", [], |r| {
-                r.get(0)
-            })?;
-        s.introduced =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM card WHERE introduced = 1", [], |r| {
-                    r.get(0)
-                })?;
-        s.due_now = self.conn.query_row(
-            "SELECT COUNT(*) FROM card WHERE due <= ?1",
-            params![now],
-            |r| r.get(0),
-        )?;
-        Ok(s)
+        let count = |sql: &str| -> Result<i64> {
+            Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
+        };
+        Ok(DeckStats {
+            words: count("SELECT COUNT(*) FROM dict")?,
+            cards: count("SELECT COUNT(*) FROM card")?,
+            new: count("SELECT COUNT(*) FROM card WHERE state = 0")?,
+            introduced: count("SELECT COUNT(*) FROM card WHERE introduced = 1")?,
+            due_now: self.conn.query_row(
+                "SELECT COUNT(*) FROM card WHERE due <= ?1",
+                params![now],
+                |r| r.get(0),
+            )?,
+        })
     }
 
     /// Look up the dictionary facts for a word.
@@ -757,7 +748,7 @@ impl Deck {
                 {
                     continue;
                 }
-                if best.map_or(true, |b| r.rank < b.rank) {
+                if best.is_none_or(|b| r.rank < b.rank) {
                     best = Some(r);
                 }
             }

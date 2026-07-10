@@ -43,12 +43,12 @@ pub fn run() -> Result<()> {
     let existing = Config::load().ok();
     let cur_needle = existing.as_ref().map(|c| c.gate.needle.as_str());
     let cur_key = existing.as_ref().map(|c| c.deepseek.api_key.as_str());
-    let is_rerun = existing.is_some();
+    let is_rerun = paths::config_file().exists();
     banner(is_rerun);
     let needle = step_earphone(cur_needle);
     let key = step_key(cur_key);
     let (engine, voice) = step_engine();
-    init_config(&needle, &key, &engine, &voice)?;
+    init_config(existing.as_ref(), &needle, &key, &engine, &voice)?;
     Ok(())
 }
 
@@ -106,6 +106,19 @@ fn step_earphone(current: Option<&str>) -> String {
                 "（暂未检测到合适的输出设备，连上后重开或先输入名字）"
             )
         );
+        #[cfg(target_os = "linux")]
+        println!(
+            "     {}",
+            paint(
+                MUTED,
+                "（Linux：default/pulse/pipewire 这类虚拟设备永远在场，无法作门，已排除；\n      蓝牙耳机需以真实 ALSA 设备出现，如 bluealsa。名字可能随重启漂移。）"
+            )
+        );
+        #[cfg(target_os = "windows")]
+        println!(
+            "     {}",
+            paint(MUTED, "（Windows：按设备名绑定，改名/换驱动后请重跑 setup）")
+        );
         let default = if cur.is_empty() { "airpods" } else { cur };
         let s = prompt(&format!(
             "     {} ",
@@ -158,8 +171,10 @@ fn step_earphone(current: Option<&str>) -> String {
 }
 
 /// Whether a device is a candidate for the earphone gate. On macOS we filter to
-/// bluetooth-class devices (the AirPods use case); elsewhere we accept any output
-/// device because cpal 0.17 doesn't expose transport metadata.
+/// bluetooth-class devices (the AirPods use case). Elsewhere cpal exposes no
+/// transport metadata, so any output qualifies EXCEPT always-present virtual sinks
+/// (ALSA `default`/`pulse`/`pipewire`/…) — binding one would hold the gate open
+/// forever and leak audio to the speakers whenever the earphone is away.
 fn gate_candidate(d: &DeviceInfo) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -167,8 +182,7 @@ fn gate_candidate(d: &DeviceInfo) -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = d;
-        true
+        !d.is_ungateable()
     }
 }
 
@@ -255,8 +269,26 @@ fn step_engine() -> (String, String) {
 
     std::fs::create_dir_all(&engine_dir).ok();
     for dl in eng.downloads() {
+        // Skip artifacts already in place (e.g. a Matcha re-run where only the
+        // vocoder was missing shouldn't re-pull the 73MB tarball). Extraction is
+        // atomic (staging dir + rename), so a present tarball subdir IS complete.
+        let is_tarball = dl.dest.extension().map(|e| e == "bz2").unwrap_or(false);
+        let already = if is_tarball {
+            tarball_subdir(&dl.dest)
+                .map(|sub| engine_dir.join(sub).exists())
+                .unwrap_or(false)
+        } else {
+            engine_dir.join(&dl.dest).exists()
+        };
+        if already {
+            println!(
+                "     {} {}",
+                paint(GREEN, "✓ 已就位"),
+                paint(MUTED, &dl.label)
+            );
+            continue;
+        }
         loop {
-            let is_tarball = dl.dest.extension().map(|e| e == "bz2").unwrap_or(false);
             let result = if is_tarball {
                 download_and_extract(&dl, &engine_dir)
             } else {
@@ -293,12 +325,47 @@ fn download_and_extract(dl: &crate::audio::tts::Download, engine_dir: &Path) -> 
     Ok(())
 }
 
+/// The top-level directory a model tarball extracts to — all sherpa tts tarballs
+/// are named after their single top-level dir (`kokoro-en-v0_19.tar.bz2` →
+/// `kokoro-en-v0_19/`), so the file stem doubles as the completion marker.
+fn tarball_subdir(dest: &Path) -> Option<String> {
+    dest.file_name()?
+        .to_str()?
+        .strip_suffix(".tar.bz2")
+        .map(str::to_string)
+}
+
 /// Pure-Rust `.tar.bz2` extraction — no system `tar` dependency (Windows-safe).
+/// Atomic: unpacks into a staging dir and renames the entries into place only on
+/// success. Without this, a Ctrl-C mid-unpack leaves every file present but the
+/// last one truncated — `models_present()` (existence checks) then reports the
+/// engine as installed while every synth fails, with no recovery path short of
+/// manually deleting the engine dir.
 fn extract_tar_bz2(archive: &Path, dest_dir: &Path) -> Result<()> {
-    let f = std::fs::File::open(archive)?;
-    let bz = bzip2::read::BzDecoder::new(f);
-    let mut ar = tar::Archive::new(bz);
-    ar.unpack(dest_dir)?;
+    let staging = dest_dir.join(".extract-tmp");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging)?;
+    let unpack = || -> Result<()> {
+        let f = std::fs::File::open(archive)?;
+        let bz = bzip2::read::BzDecoder::new(f);
+        let mut ar = tar::Archive::new(bz);
+        ar.unpack(&staging)?;
+        Ok(())
+    };
+    if let Err(e) = unpack() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+    for entry in std::fs::read_dir(&staging)? {
+        let entry = entry?;
+        let target = dest_dir.join(entry.file_name());
+        if target.exists() {
+            let _ = std::fs::remove_dir_all(&target);
+            let _ = std::fs::remove_file(&target);
+        }
+        std::fs::rename(entry.path(), &target)?;
+    }
+    let _ = std::fs::remove_dir_all(&staging);
     Ok(())
 }
 
@@ -342,7 +409,14 @@ fn migrate_old_files() {
 /// no `curl` on the host. Writes to a `.part` file and renames on success so a killed
 /// download never leaves a half-file that looks complete.
 pub fn download_with_progress(url: &str, dest: &std::path::Path, label: &str) -> Result<()> {
-    let client = reqwest::blocking::Client::builder().timeout(None).build()?;
+    // No TOTAL timeout (a 300MB model on slow wifi is legitimate), but a dead
+    // connection must not freeze the wizard on a blank bar forever: bound the
+    // connect. (reqwest's blocking client has no per-read timeout; a stall after
+    // connect still surfaces via the frozen progress bar + Ctrl-C.)
+    let client = reqwest::blocking::Client::builder()
+        .timeout(None)
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .build()?;
     let mut resp = client.get(url).send()?.error_for_status()?;
     let total = resp.content_length().unwrap_or(0);
     let tmp = dest.with_extension("part");
@@ -390,16 +464,28 @@ fn render_bar(label: &str, done: u64, total: u64) {
     std::io::stdout().flush().ok();
 }
 
-fn init_config(needle: &str, key: &str, engine: &str, voice: &str) -> Result<()> {
+/// Write config.toml. The wizard only *asks about* needle/key/engine/voice — every
+/// other preference (speed, custom base_url/models, [a11y] reduced_motion) is
+/// carried over from the existing config, so re-running `tuna setup` to download a
+/// second engine can't silently reset what the user hand-tuned.
+fn init_config(
+    existing: Option<&Config>,
+    needle: &str,
+    key: &str,
+    engine: &str,
+    voice: &str,
+) -> Result<()> {
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let dft = Config::default();
+    let prev = existing.unwrap_or(&dft);
     let toml = format!(
-        "# tuna 配置 · ~/.tuna/config.toml（由首次设置生成，可随时手改）\n\
+        "# tuna 配置 · ~/.tuna/config.toml（由设置向导生成，可随时手改）\n\
          # 也可用环境变量 DEEPSEEK_API_KEY 覆盖密钥。\n\n\
          [deepseek]\n\
          api_key = \"{key_esc}\"\n\
-         base_url = \"https://api.deepseek.com\"\n\
-         enrich_model = \"deepseek-v4-flash\"\n\
-         chat_model = \"deepseek-v4-pro\"\n\n\
+         base_url = \"{base_url}\"\n\
+         enrich_model = \"{enrich_model}\"\n\
+         chat_model = \"{chat_model}\"\n\n\
          [gate]\n\
          # 绑定耳机的名字子串（只在连着它时才发声）\n\
          needle = \"{needle_esc}\"\n\n\
@@ -407,9 +493,17 @@ fn init_config(needle: &str, key: &str, engine: &str, voice: &str) -> Result<()>
          # engine = kokoro | matcha | piper（运行时按 s 打开设置切换）\n\
          engine = \"{engine}\"\n\
          voice = \"{voice}\"\n\
-         speed = 1.0\n",
+         speed = {speed}\n\n\
+         [a11y]\n\
+         # reduced_motion = true 时跳过所有动画\n\
+         reduced_motion = {reduced_motion}\n",
         key_esc = esc(key),
         needle_esc = esc(needle),
+        base_url = esc(&prev.deepseek.base_url),
+        enrich_model = esc(&prev.deepseek.enrich_model),
+        chat_model = esc(&prev.deepseek.chat_model),
+        speed = prev.tts.speed,
+        reduced_motion = prev.a11y.reduced_motion,
     );
     std::fs::write(paths::config_file(), toml)?;
     Ok(())

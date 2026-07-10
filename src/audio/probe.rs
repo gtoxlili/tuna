@@ -44,9 +44,10 @@ impl Transport {
 }
 
 /// A single audio device, platform-agnostic. `stable_id` is the macOS UID on macOS
-/// (stable across reconnect, embeds the BT MAC) and falls back to the device name on
-/// Linux/Windows where cpal 0.17 doesn't expose a stable id — so binding by name is
-/// the honest contract there, with a warning surfaced in the setup wizard.
+/// (stable across reconnect, embeds the BT MAC); on Linux/Windows it currently falls
+/// back to the device name (config stores the name; cpal's stable `id()` is a planned
+/// upgrade), so binding by name is the honest contract there, with a drift warning
+/// surfaced in the setup wizard.
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
     pub stable_id: String,
@@ -74,6 +75,40 @@ impl DeviceInfo {
 
     pub fn transport_label(&self) -> &'static str {
         self.transport.label()
+    }
+
+    /// Devices that exist regardless of whether any physical hardware is present —
+    /// ALSA's virtual PCMs (`default`, `pulse`, `pipewire`, …). Binding one would
+    /// hold the gate open forever and route audio to whatever the sound server
+    /// currently picks — usually the speakers — the exact leak the gate exists to
+    /// prevent. They are excluded from gate candidates and gate matching.
+    pub fn is_ungateable(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let lower = self.name.to_lowercase();
+            let base = lower.split(':').next().unwrap_or(&lower);
+            matches!(
+                base,
+                "default"
+                    | "sysdefault"
+                    | "pulse"
+                    | "pipewire"
+                    | "null"
+                    | "jack"
+                    | "oss"
+                    | "dmix"
+                    | "dsnoop"
+                    | "samplerate"
+                    | "speexrate"
+                    | "upmix"
+                    | "vdownmix"
+                    | "lavrate"
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
     }
 }
 
@@ -116,10 +151,13 @@ impl AudioProbe for MacosProbe {
 
 // ── Linux / Windows: cpal ALSA / WASAPI ───────────────────────────────────────
 //
-// cpal 0.17 doesn't expose transport type or a stable device id on these targets.
-// We treat every enumerated output device as a one-stream `Unknown`-transport output
-// and let the user pick by name in the setup wizard — with a warning that ALSA names
-// can drift across reboots, so rebinding may be needed.
+// cpal 0.17 doesn't expose transport type on these targets. It DOES have a stable
+// `Device::id()` (WASAPI endpoint id / ALSA PCM id) — binding still uses the display
+// name because that's what config.toml stores and what the user recognizes; moving
+// the binding to `id()` is a known improvement that needs a config-schema change
+// (tracked in backlog). We treat every enumerated output device as a one-stream
+// `Unknown`-transport output and let the user pick by name in the setup wizard —
+// with a warning that ALSA names can drift across reboots, so rebinding may be needed.
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub struct CpalProbe;
@@ -149,15 +187,38 @@ impl AudioProbe for CpalProbe {
     }
 }
 
-/// Find the bound earphone among output devices, matched case-insensitively by name
-/// substring. Prefers a Bluetooth-class match when several outputs share the needle —
-/// this is what disambiguates an AirPods output from a same-named HFP input on macOS.
+/// Find the bound earphone among output devices — the GATE policy, shared by the
+/// study session's `poll_gate` and `gate-test`. Matched case-insensitively by name
+/// substring, with two hard requirements on top:
+///
+/// - always-present virtual sinks (`is_ungateable`) never match — a gate that can't
+///   close is not a gate;
+/// - on macOS, only Bluetooth-class devices qualify. The transport is known there,
+///   and a loose needle (say "air" hand-edited into config.toml) must not open the
+///   gate on "MacBook Air扬声器". On Linux/Windows cpal exposes no transport, so
+///   name matching stays the honest (weaker, documented) contract.
+///
+/// A Bluetooth match is preferred when several outputs share the needle — this is
+/// what disambiguates an AirPods output from a same-named HFP input on macOS.
 pub fn find_bound_output<'a>(devices: &'a [DeviceInfo], needle: &str) -> Option<&'a DeviceInfo> {
     let needle = needle.to_lowercase();
     let mut matches: Vec<&DeviceInfo> = devices
         .iter()
-        .filter(|d| d.is_output() && d.name.to_lowercase().contains(&needle))
+        .filter(|d| {
+            d.is_output() && !d.is_ungateable() && d.name.to_lowercase().contains(&needle)
+        })
         .collect();
+    #[cfg(target_os = "macos")]
+    matches.retain(|d| d.is_bluetooth());
     matches.sort_by_key(|d| !d.is_bluetooth());
     matches.into_iter().next()
+}
+
+/// Permissive name lookup with no gate policy — for diagnostics (`gate-test` uses it
+/// to explain WHY a device the gate refuses would otherwise have matched).
+pub fn find_output_by_name<'a>(devices: &'a [DeviceInfo], needle: &str) -> Option<&'a DeviceInfo> {
+    let needle = needle.to_lowercase();
+    devices
+        .iter()
+        .find(|d| d.is_output() && d.name.to_lowercase().contains(&needle))
 }

@@ -32,7 +32,7 @@ src/
 ├── llm/
 │   ├── mod.rs         DeepSeek OpenAI 兼容 blocking 客户端;chat_json / chat_text
 │   ├── enrich.rs      词条精加工 schema(Enrichment/Morpheme/GraphEdge/Example)+ enrich_word
-│   ├── socratic.rs    苏格拉底辨析 + guess-eval(点评用户的推导猜测)
+│   ├── socratic.rs    苏格拉底辨析 + 多轮推导对话(derive_chat,引导不给答案)
 │   └── mod.rs
 └── ui/
     ├── app.rs         App 状态机:Stage/Strike/Ask/Gate;on_key 事件路由;后台轮询
@@ -89,21 +89,30 @@ src/
 - **Strike**(P2 星火接线):`Prompt` / `Flipped` / `Idle`。新词揭示后弹"词根 X 你在哪个已学的词里见过?",
   用户脑内回忆 → `Space` 翻牌 → 显示 FSRS 挑的最佳老词 → y/n 给那个老词记一次真复习。
   Strike 期间**阻塞新词评分**;Prompt 阶段隐藏 siblings 列表防剧透。节点只在被回忆时愈合。
-- **Ask**(P3 guess-eval):`Idle` / `Pending` / `Answer` / `Failed`。`a` 键在有 typed guess 时,
-  把用户推导猜测发 DeepSeek 做苏格拉底式点评(LLM 提引导性问题,不给直接判决)。
+- **Ask**:`Idle` / `Pending` / `Answer` / `Failed`。揭示后 `a` 发起苏格拉底辨析
+  (LLM 提引导性问题,不给直接判决)。
+- **Derive**(推导对话):`Closed` / `Open` / `Pending`。新词未揭示时 `a` 打开多轮聊天,
+  学习者说出自己的拆解,LLM 拿着已核验词素与真实含义引导但绝不直说。Esc 收起保留对话,
+  回复在收起后到达以 toast 提示;换卡即清空。
 - **Gate**:`Open` / `Closed`。Closed 时零音频。
 
 ### 键位(学习界面)
 
 | 键 | 作用 |
 |---|---|
-| `Enter` | 揭示(Phase A → B) |
-| `Space` | 发音(只走绑定耳机;未缓存则当场合成,首次含图优化 ~0.6s release) |
-| `↑↓` | 选读(揭示后切换朗读目标:单词本身 / 例句;wraparound) |
-| `a` | 苏格拉底辨析 / guess-eval(需 DeepSeek 密钥) |
-| `w` | 打开该词 Wiktionary 词源页 |
+| `Enter` | 揭示(Phase A → B);推导对话内=发送 |
+| `Space` | 发音(只走绑定耳机;未缓存则当场合成);星火接线内=翻牌 |
+| `↑↓` | 选读(揭示后切换朗读目标:单词本身 / 例句);overlay 内=导航/滚动 |
+| `1-4` / `hjkl` | FSRS 评分(揭示后;hjkl 为 home-row 镜像) |
+| `y` / `n` | 星火接线:记得 / 想不起(给锚点词记一次真实 FSRS 复习) |
+| `u` | 撤销上次评分(评分后 3 秒内一步;窗口内 keybar 显示 `u 撤销` 提示) |
+| `Tab` | 命令菜单(↑↓ 选 Enter 确认,字母直达;推导对话输入时归输入所有) |
+| `a` | 新词未揭示=多轮推导对话;揭示后与复习=苏格拉底辨析(均需 DeepSeek 密钥) |
+| `w` | 打开该词 Wiktionary 词源页(揭示后) |
 | `g` | 星座:当前词的词根家族(同根已学词 + 只差一个词根的前沿暗星);overlay 内 `↑↓` 导航 `Space` 朗读 |
-| `s` | 设置:运行时切换 TTS 引擎 overlay(Kokoro/Matcha/Piper) |
+| `s` | 设置:运行时切换 TTS 引擎 overlay(Kokoro/Matcha/Piper);done 态也可用 |
+| `?` | 帮助 overlay(任意状态;Esc/? 关闭,其他键穿透到下层) |
+| `Esc` | 退一层:关 overlay / 跳过星火接线 / 清除 Error toast / 再按一次退出(done 单按) |
 
 ## CLI 命令面
 
@@ -130,10 +139,13 @@ src/
 这几条是系统属性,改相关代码前必须守住(完整理由见 [conventions.md](./conventions.md)):
 
 - **耳机门是物理保证,不是 if 拦截**:`RoutedPlayer` 把流直接开在绑定的 cpal 设备上,不指向
-  系统默认输出的流,所以漏音在物理上不可能。耳机不在场 → `find_output_device` 返回 `None` →
-  fail-closed 静音,不回退扬声器。绑定契约跨平台有差异:macOS 按设备 UID(跨重连稳定、内嵌 MAC,
-  解决 AirPods 同名输入/输出掷硬币问题);Linux/Windows 因 cpal 0.17 不暴露稳定 UID/transport,
-  回退按显示名绑定，setup 向导显式告警 ALSA/WASAPI 名字可能随重启漂移,需重跑 setup 重绑。
+  系统默认输出的流,所以漏音在物理上不可能。耳机不在场 → 门匹配返回 `None` →
+  fail-closed 静音,不回退扬声器。门策略(`probe::find_bound_output`)有两条硬性要求:
+  ① 永远在场的虚拟设备(ALSA `default`/`pulse`/`pipewire` 等)不可作门,否则门永不关闭,
+  声音会被声音服务器路由到扬声器;② macOS 上只有蓝牙类设备可开门(transport 可知),
+  防止宽松的 needle(如手改成 "air")匹配到 "MacBook Air扬声器"。绑定契约跨平台有差异:
+  macOS 按设备 UID 消歧(跨重连稳定、内嵌 MAC);Linux/Windows 因 cpal 0.17 不暴露 transport,
+  按显示名绑定,setup 向导显式告警名字可能随重启漂移,需重跑 setup 重绑。
 - **单二进制自包含**:`assets.rs` 把 4801 词词典(2.2M,`DECK`)+ 精加工(`ENRICHMENT`)`include_str!`
   进二进制;morpheme 脊柱在运行时从 enrichment 派生(`normalize_morpheme`),`assets/morphemes.jsonl`
   虽提交进仓库但不被加载(只作人类可审 spine)。TTS 模型(63–320MB,随引擎)首启向导同步下载 +
@@ -154,15 +166,15 @@ src/
 api_key = ""                                    # 或 $DEEPSEEK_API_KEY 覆盖
 base_url = "https://api.deepseek.com"
 enrich_model = "deepseek-v4-flash"              # 精加工
-chat_model = "deepseek-v4-pro"                  # 辨析/guess-eval
+chat_model = "deepseek-v4-pro"                  # 辨析/推导对话
 
 [gate]
 needle = "airpods"                              # 绑定耳机的名字子串
 
 [tts]
 engine = "kokoro"                                # kokoro | matcha | piper（运行时按 s 切换）
-voice = "af_heart"
+voice = "af"                                     # kokoro-en-v0_19 的 11 个音色之一(手改生效)
 speed = 1.0
 ```
 
-学习本身**离线可用、无需密钥**。辨析 / guess-eval 才需要 DeepSeek 密钥(`require_key()` 会 bail)。
+学习本身**离线可用、无需密钥**。辨析 / 推导对话才需要 DeepSeek 密钥(`require_key()` 会 bail)。

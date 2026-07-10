@@ -158,7 +158,8 @@ pub struct ChatTurn {
 }
 
 /// State of the derivation chat overlay (Phase A only — "拆" with LLM guidance).
-/// Closed = not active; Open = user can type; Pending = message sent, awaiting LLM.
+/// Closed = collapsed (the conversation, if any, is kept until the card changes);
+/// Open = user can type; Pending = message sent, awaiting LLM.
 #[derive(PartialEq)]
 pub enum DeriveState {
     Closed,
@@ -242,11 +243,13 @@ pub struct App {
     pub settings: Settings,
     /// Tab command menu — the "software化" primary command surface.
     pub cmdmenu: CommandMenu,
-    /// Undo snapshot: the card + position before the most recent grade, with a
-    /// timestamp. One-step undo within a 3s window (Anki AJT style); past the
+    /// Undo snapshot: the card + its queue position before the most recent grade,
+    /// with a timestamp. One-step undo within a 3s window (Anki AJT style); past the
     /// window the grade is final. Multi-step undo would let the displayed card
-    /// flow diverge from FSRS's review history — breaking parameter trust.
-    undo_snap: Option<(DeckCard, Instant)>,
+    /// flow diverge from FSRS's review history — breaking parameter trust. The pos
+    /// is snapshotted (not re-derived by `pos - 1`) because `load_current` may have
+    /// skipped entries with no dict entry after the grade.
+    undo_snap: Option<(DeckCard, usize, Instant)>,
     // Socratic 辨析 (live DeepSeek on a worker thread)
     pub ask: Ask,
     ask_rx: Option<std::sync::mpsc::Receiver<(u64, std::result::Result<String, String>)>>,
@@ -261,7 +264,9 @@ pub struct App {
     pub derive_turns: Vec<ChatTurn>,
     /// Receiver for derivation chat LLM responses (separate from ask_rx).
     derive_rx: Option<std::sync::mpsc::Receiver<std::result::Result<String, String>>>,
-    /// Scroll offset for the derivation chat popup.
+    /// Scroll offset for the derivation chat popup, counted in rows up from the
+    /// BOTTOM (0 = pinned to the newest message). The render side converts this to
+    /// a top offset, so new replies are always in view without chasing them.
     pub derive_scroll: usize,
     ds_base: String,
     ds_key: String,
@@ -448,7 +453,9 @@ impl App {
             }
             self.show_help = false;
             // Fall through — the key reaches the overlay/base handler below.
-        } else if matches!(key.code, KeyCode::Char('?')) {
+        } else if matches!(key.code, KeyCode::Char('?')) && self.derive != DeriveState::Open {
+            // While the chat input is live, '?' is a character the learner may
+            // legitimately type — it falls through to the input instead of help.
             self.show_help = true;
             return Ok(());
         }
@@ -469,12 +476,16 @@ impl App {
             if let Ask::Answer(text) = &self.ask {
                 match key.code {
                     KeyCode::Down | KeyCode::Right => {
-                        // Clamp so the user can't scroll past the content into blank.
-                        // The popup shows roughly 10 lines after borders/padding; the
-                        // raw line count overestimates visible lines (wrapping adds
-                        // more), so this is a safe upper bound.
-                        let max = text.lines().count().saturating_sub(10);
-                        self.ask_scroll = (self.ask_scroll + 1).min(max);
+                        // Clamp so the user can't scroll far past the content into
+                        // blank. Wrapping means the DISPLAY line count exceeds the
+                        // raw count (a clamp on raw lines cut off the tail of long
+                        // wrapped answers), so estimate wrapped rows generously: a
+                        // few rows of over-scroll beats an unreachable ending.
+                        let rows: usize = text
+                            .lines()
+                            .map(|l| l.chars().count() / 24 + 1)
+                            .sum();
+                        self.ask_scroll = (self.ask_scroll + 1).min(rows.saturating_sub(3));
                         return Ok(());
                     }
                     KeyCode::Up | KeyCode::Left => {
@@ -489,7 +500,7 @@ impl App {
             // the grade registered when it didn't.
             if matches!(
                 key.code,
-                KeyCode::Char('1'..='4' | 'h' | 'j' | 'k' | 'l' | 'w' | 's' | 'g' | ' ')
+                KeyCode::Char('1'..='4' | 'h' | 'j' | 'k' | 'l' | 'w' | 's' | 'g' | 'u' | ' ')
                     | KeyCode::Enter
             ) {
                 self.toast = Some(ToastMsg::info("先 a/Esc 关闭辨析"));
@@ -500,11 +511,18 @@ impl App {
         if self.show_graph {
             return self.on_graph_key(key);
         }
+        // The derivation chat overlay — multi-turn LLM conversation for Phase A "拆".
+        // A text-input surface owns ALL its keys, including Tab: opening the command
+        // menu mid-sentence (and firing "辨析" with a stray 'a', wiping the draft)
+        // is exactly the kind of key leak a chat box must not have.
+        if self.derive != DeriveState::Closed {
+            return self.on_derive_key(key);
+        }
         // The command menu: Tab opens it (anywhere except deeper overlays), ↑↓ moves,
         // Enter fires the selected command, letters (a/w/g/s/?) fire directly, Esc/Tab
-        // close. The menu sits below settings/ask/graph — those swallow input first —
-        // but above help and the base card, so it's reachable from Prompt, Revealed,
-        // and done alike (settings is a runtime concern, not card-stage-bound).
+        // close. The menu sits below settings/ask/graph/derive — those swallow input
+        // first — but above help and the base card, so it's reachable from Prompt,
+        // Revealed, and done alike (settings is a runtime concern, not card-stage-bound).
         if self.cmdmenu.open {
             return self.on_cmdmenu_key(key);
         }
@@ -513,15 +531,9 @@ impl App {
             self.cmdmenu.cursor = 0;
             return Ok(());
         }
-        // The derivation chat overlay — multi-turn LLM conversation for Phase A "拆".
-        // Sits below cmdmenu (Tab still works) but above the base card. When open or
-        // pending, printable chars build the chat input; Enter sends, Esc closes.
-        if self.derive != DeriveState::Closed {
-            return self.on_derive_key(key);
-        }
         // Clear any non-sticky toast on the next keypress — Error toasts stay until
-        // an explicit Esc/Space so the user can read a failure message even if they
-        // reflexively hit a no-op key (like 'z' at base) right after it appears.
+        // an explicit Esc (handled in the Esc arm below) so the user can read a
+        // failure message even if they reflexively hit a no-op key right after.
         if !matches!(
             self.toast.as_ref().map(|t| t.level),
             Some(ToastLevel::Error)
@@ -572,6 +584,17 @@ impl App {
         // Universal keys, in every context.
         match key.code {
             KeyCode::Esc => {
+                // A sticky Error toast is dismissed by the FIRST Esc, which then
+                // stops — otherwise "dismiss the error" and "prime the quit" share
+                // a key, and a user tapping Esc twice to clear a message quits the
+                // whole session instead.
+                if matches!(
+                    self.toast.as_ref().map(|t| t.level),
+                    Some(ToastLevel::Error)
+                ) {
+                    self.toast = None;
+                    return Ok(());
+                }
                 // Single Esc quits when the session is done — there's no review
                 // state left to lose, so a confirmation gate there is pure
                 // friction. At base (mid-session) the two-press gate still applies.
@@ -579,12 +602,11 @@ impl App {
                     self.should_quit = true;
                     return Ok(());
                 }
-                if let Some(t) = self.esc_confirm {
-                    if t.elapsed() < ESC_CONFIRM_MS {
+                if let Some(t) = self.esc_confirm
+                    && t.elapsed() < ESC_CONFIRM_MS {
                         self.should_quit = true;
                         return Ok(());
                     }
-                }
                 self.esc_confirm = Some(Instant::now());
                 self.toast = Some(ToastMsg::warn("再按 Esc 退出"));
                 return Ok(());
@@ -594,8 +616,8 @@ impl App {
                 return Ok(());
             }
             KeyCode::Enter => {
-                if let Some(c) = &mut self.current {
-                    if c.stage == Stage::Prompt {
+                if let Some(c) = &mut self.current
+                    && c.stage == Stage::Prompt {
                         c.stage = Stage::Revealed;
                         // A learned sibling exists → light the 星火接线 prompt.
                         if c.anchor.is_some() {
@@ -610,7 +632,6 @@ impl App {
                             Some(Instant::now())
                         };
                     }
-                }
                 return Ok(());
             }
             _ => {}
@@ -647,8 +668,11 @@ impl App {
         );
         let done = self.done();
         match key.code {
+            // `a` needs a current card: derive chat on a new word's Prompt, Socratic
+            // 辨析 once revealed. At done there is no word to ask about — binding it
+            // there would be a silent no-op (ask_socratic returns on current=None).
             KeyCode::Char('a') if is_new_prompt => self.start_derive_chat(),
-            KeyCode::Char('a') if revealed || done => self.ask_socratic(),
+            KeyCode::Char('a') if revealed => self.ask_socratic(),
             KeyCode::Char('w') if revealed => self.open_wiktionary(),
             KeyCode::Char('g') if revealed => self.open_graph(),
             // Settings is a runtime concern — reachable even after the session ends
@@ -689,40 +713,26 @@ impl App {
             KeyCode::Up => self.cmdmenu.move_cursor(-1, &items),
             KeyCode::Down => self.cmdmenu.move_cursor(1, &items),
             KeyCode::Enter => {
-                if let Some(it) = items.get(self.cmdmenu.cursor) {
+                if let Some(it) = items.get(self.cmdmenu.cursor)
+                    && it.enabled {
+                        let label = it.label;
+                        self.cmdmenu.open = false;
+                        return self.fire_command(label);
+                    }
+            }
+            // Direct letter shortcuts — expert mode. They fire the command and close
+            // the menu in one stroke, so power users aren't slowed by the menu. A
+            // letter respects the same enabled gate as Enter — otherwise the menu
+            // would show a row dimmed while its shortcut silently fires anyway (or
+            // no-ops), and the dimming would be a lie either way.
+            KeyCode::Char(ch @ ('a' | 'w' | 'g' | 's' | '?' | 'u')) => {
+                if let Some(it) = items.iter().find(|it| it.shortcut == ch.to_string()) {
                     if it.enabled {
                         let label = it.label;
                         self.cmdmenu.open = false;
                         return self.fire_command(label);
                     }
-                }
-            }
-            // Direct letter shortcuts — expert mode. They fire the command and close
-            // the menu in one stroke, so power users aren't slowed by the menu.
-            KeyCode::Char('a') => {
-                self.cmdmenu.open = false;
-                return self.fire_command("辨析");
-            }
-            KeyCode::Char('w') => {
-                self.cmdmenu.open = false;
-                return self.fire_command("词源");
-            }
-            KeyCode::Char('g') => {
-                self.cmdmenu.open = false;
-                return self.fire_command("星座");
-            }
-            KeyCode::Char('s') => {
-                self.cmdmenu.open = false;
-                return self.fire_command("设置");
-            }
-            KeyCode::Char('?') => {
-                self.cmdmenu.open = false;
-                return self.fire_command("帮助");
-            }
-            KeyCode::Char('u') => {
-                if items.iter().any(|it| it.label == "撤销评分" && it.enabled) {
-                    self.cmdmenu.open = false;
-                    return self.fire_command("撤销评分");
+                    self.toast = Some(ToastMsg::info(it.hint));
                 }
             }
             _ => {}
@@ -819,6 +829,8 @@ impl App {
     /// instantly; uncached ones synthesize on a worker thread (spinner shows the
     /// `label`), then play. `label` is the short display string for the spinner.
     fn play_audio(&mut self, text: &str, label: &str) {
+        // Re-validate the gate at the moment of playing, not on the 1s poll cadence.
+        self.refresh_gate();
         if !self.gate.open {
             self.toast = Some(ToastMsg::warn("耳机未连接 · 静默"));
             return;
@@ -828,8 +840,11 @@ impl App {
             self.play_cached(label, &path);
             return;
         }
-        // Lazy synth: fire on a worker thread so the UI stays live.
+        // Lazy synth: fire on a worker thread so the UI stays live. A second press
+        // while one is in flight gets an acknowledgement — hammering Space in
+        // silence otherwise reads as "the key is broken".
         if self.tts_pending.is_some() {
+            self.toast = Some(ToastMsg::info("合成中，请稍候"));
             return;
         }
         if !self.tts.models_present() {
@@ -965,7 +980,7 @@ impl App {
                 // tell whether '3' graded the word or vanished into the overlay.
                 if matches!(
                     key.code,
-                    KeyCode::Char('1'..='4' | 'h' | 'j' | 'k' | 'l' | 'a' | 'w' | 's')
+                    KeyCode::Char('1'..='4' | 'h' | 'j' | 'k' | 'l' | 'a' | 'w' | 's' | 'u')
                         | KeyCode::Enter
                 ) {
                     self.toast = Some(ToastMsg::info("先 g/Esc 关闭星座"));
@@ -1073,7 +1088,7 @@ impl App {
     pub fn grade_flash(&self) -> Option<(rs_fsrs::Rating, f64)> {
         let (rating, t) = self.grade_flash?;
         let p = t.elapsed().as_millis() as f64 / GRADE_FLASH_MS as f64;
-        (p <= 1.0).then(|| (rating, p))
+        (p <= 1.0).then_some((rating, p))
     }
 
     /// Whether a grade-undo is available right now (snapshot exists and within the
@@ -1082,7 +1097,7 @@ impl App {
     pub fn can_undo(&self) -> bool {
         self.undo_snap
             .as_ref()
-            .is_some_and(|(_, t)| t.elapsed() <= Duration::from_secs(3))
+            .is_some_and(|(_, _, t)| t.elapsed() <= Duration::from_secs(3))
     }
 
     /// Current Socratic-answer scroll offset (arrow keys in the Ask::Answer popup).
@@ -1158,17 +1173,20 @@ impl App {
         Ok(())
     }
 
-    /// Ensure a playback stream bound to the earphone exists. Returns whether one is ready.
+    /// Ensure a playback stream bound to the earphone exists. Returns whether one is
+    /// ready. Opens by the gate's VALIDATED device name (exact match preferred) rather
+    /// than re-running the needle search — otherwise the device the probe validated
+    /// and the device cpal opens could be two different needle matches.
     fn ensure_player(&mut self) -> bool {
         if self.player.is_some() {
             return true;
         }
-        if let Some(device) = player::find_output_device(&self.needle) {
-            if let Ok(p) = RoutedPlayer::open(device) {
+        let target = self.gate.device.clone().unwrap_or_else(|| self.needle.clone());
+        if let Some(device) = player::find_output_device(&target)
+            && let Ok(p) = RoutedPlayer::open(device) {
                 self.player = Some(p);
                 return true;
             }
-        }
         false
     }
 
@@ -1246,9 +1264,12 @@ impl App {
 
     /// Send the learner's OWN derivation guess to DeepSeek for a Socratic critique of
     /// his reasoning — the guess becomes a live channel, not a dead echo.
-    /// Open the derivation chat overlay for the current new word. Doesn't send a
-    /// message yet — the user types their guess and presses Enter to send. If no
-    /// DeepSeek key is configured, show the failure immediately.
+    /// Open (or reopen) the derivation chat overlay for the current new word.
+    /// Doesn't send a message yet — the user types their guess and presses Enter.
+    /// Reopening resumes the same conversation: the turns survive an Esc-collapse,
+    /// and if a reply is still in flight the overlay comes back in Pending so the
+    /// spinner picks up where it left off. If no DeepSeek key is configured, show
+    /// the failure immediately.
     fn start_derive_chat(&mut self) {
         if self.ds_key.is_empty() {
             self.toast = Some(ToastMsg::error(
@@ -1256,9 +1277,12 @@ impl App {
             ));
             return;
         }
-        self.input.clear();
         self.derive_scroll = 0;
-        self.derive = DeriveState::Open;
+        self.derive = if self.derive_rx.is_some() {
+            DeriveState::Pending
+        } else {
+            DeriveState::Open
+        };
     }
 
     /// Send the current input as a new message in the derivation chat. Spawns a
@@ -1283,10 +1307,30 @@ impl App {
                     .join(" + ")
             })
             .unwrap_or_default();
-        // Stash the user message + history for the worker.
+        // The verified gloss — the chat system prompt promises the model the ground
+        // truth so it can steer without inventing a wrong "correct answer".
+        let meaning = c
+            .enrichment
+            .as_ref()
+            .filter(|en| !en.gloss_zh.is_empty())
+            .map(|en| en.gloss_zh.clone())
+            .or_else(|| {
+                c.entry
+                    .translation
+                    .lines()
+                    .next()
+                    .map(|t| t.trim().to_string())
+            })
+            .unwrap_or_default();
+        // Stash the user message + recent history for the worker. Cap the resent
+        // history — a marathon chat would otherwise inflate every request's prompt
+        // with the full transcript; the last dozen turns carry the live thread.
+        const HISTORY_CAP: usize = 12;
+        let skip = self.derive_turns.len().saturating_sub(HISTORY_CAP);
         let history: Vec<(bool, String)> = self
             .derive_turns
             .iter()
+            .skip(skip)
             .map(|t| (t.is_user, t.text.clone()))
             .collect();
         let (base, key, model) = (
@@ -1299,7 +1343,7 @@ impl App {
         std::thread::spawn(move || {
             let client = DeepSeek::new(base, key);
             let res = crate::llm::socratic::derive_chat(
-                &client, &model, &word, &morphemes, &history, &send_msg,
+                &client, &model, &word, &morphemes, &meaning, &history, &send_msg,
             )
             .map_err(|e| e.to_string());
             let _ = tx.send(res);
@@ -1315,47 +1359,64 @@ impl App {
     }
 
     /// Handle keys while the derivation chat overlay is open (or pending).
+    /// Esc collapses the overlay but KEEPS the conversation — the learner often
+    /// wants to glance at the card under the popup and come back; `a` reopens with
+    /// the history intact (it only resets when the card changes). A reply that
+    /// lands while collapsed is announced by toast, not lost.
     fn on_derive_key(&mut self, key: KeyEvent) -> Result<()> {
-        match (&self.derive, key.code) {
-            (DeriveState::Closed, _) => {}
-            (DeriveState::Pending, KeyCode::Esc) => {
-                self.derive = DeriveState::Closed;
-                self.derive_turns.clear();
-                self.derive_rx = None;
+        // ↑↓ scroll the history in either state (reading back mid-wait is normal).
+        // `derive_scroll` counts rows up from the BOTTOM: 0 = pinned to the newest
+        // message, so an arriving reply is always visible without chasing it.
+        match key.code {
+            KeyCode::Up => {
+                self.derive_scroll = (self.derive_scroll + 1).min(self.derive_rows_cap());
+                return Ok(());
             }
-            (DeriveState::Pending, _) => {
-                // Waiting for the LLM — only Esc works.
-            }
-            (DeriveState::Open, KeyCode::Esc) => {
-                self.derive = DeriveState::Closed;
-                self.derive_turns.clear();
-            }
-            (DeriveState::Open, KeyCode::Enter) => {
-                if !self.input.trim().is_empty() {
-                    self.send_derive_msg();
-                }
-            }
-            (DeriveState::Open, KeyCode::Backspace) => {
-                self.input.pop();
-            }
-            (DeriveState::Open, KeyCode::Up) => {
+            KeyCode::Down => {
                 self.derive_scroll = self.derive_scroll.saturating_sub(1);
+                return Ok(());
             }
-            (DeriveState::Open, KeyCode::Down) => {
-                self.derive_scroll = self.derive_scroll.saturating_add(1);
+            KeyCode::Esc => {
+                self.derive = DeriveState::Closed;
+                return Ok(());
             }
-            (DeriveState::Open, KeyCode::Char(c)) if !c.is_control() => {
-                self.input.push(c);
-            }
-            (DeriveState::Open, _) => {}
+            _ => {}
         }
+        if self.derive == DeriveState::Open {
+            match key.code {
+                KeyCode::Enter => {
+                    if !self.input.trim().is_empty() {
+                        self.send_derive_msg();
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.input.pop();
+                }
+                KeyCode::Char(c) if !c.is_control() => {
+                    self.input.push(c);
+                }
+                _ => {}
+            }
+        }
+        // Pending swallows everything else — the input line is hidden while the
+        // LLM is thinking, so there's nothing for other keys to act on.
         Ok(())
+    }
+
+    /// A soft upper bound on how far back the chat can scroll — a rough row count
+    /// of the conversation. Render-side pinning clamps exactly; this just stops the
+    /// offset growing unbounded (which would need N presses of ↓ to come back).
+    fn derive_rows_cap(&self) -> usize {
+        self.derive_turns
+            .iter()
+            .map(|t| t.text.chars().count() / 32 + 2)
+            .sum()
     }
 
     /// Drain any completed background work (Socratic answer, on-demand synth).
     pub fn poll_async(&mut self) {
-        if let Some(rx) = &self.ask_rx {
-            if let Ok((gen_id, res)) = rx.try_recv() {
+        if let Some(rx) = &self.ask_rx
+            && let Ok((gen_id, res)) = rx.try_recv() {
                 // Discard stale results: if the user cancelled (Esc/a) and reopened ask,
                 // ask_gen has moved on and this result is from the old (still-billing)
                 // worker. Dropping it stops a stale answer popping up over the new one.
@@ -1367,32 +1428,39 @@ impl App {
                 }
                 self.ask_rx = None;
             }
-        }
-        // Derivation chat response — append the LLM reply to the conversation and
-        // reopen the input. If the user closed the chat while pending, discard.
-        if let Some(rx) = &self.derive_rx {
-            if let Ok(res) = rx.try_recv() {
-                if self.derive == DeriveState::Pending {
-                    match res {
-                        Ok(text) => {
-                            self.derive_turns.push(ChatTurn {
-                                is_user: false,
-                                text,
-                            });
+        // Derivation chat response — append the LLM reply to the conversation. The
+        // conversation survives an Esc-collapse, so the reply lands in the history
+        // either way; when collapsed we announce it by toast instead of popping the
+        // overlay back open uninvited. (Card switches clear derive_rx, so a stale
+        // reply can never land on the wrong word.)
+        if let Some(rx) = &self.derive_rx
+            && let Ok(res) = rx.try_recv() {
+                let collapsed = self.derive == DeriveState::Closed;
+                match res {
+                    Ok(text) => {
+                        self.derive_turns.push(ChatTurn {
+                            is_user: false,
+                            text,
+                        });
+                        self.derive_scroll = 0; // pin to the newest message
+                        if collapsed {
+                            self.toast = Some(ToastMsg::info("推导回复已就绪 · 按 a 查看"));
+                        } else {
                             self.derive = DeriveState::Open;
                         }
-                        Err(e) => {
-                            let first = e.lines().next().unwrap_or("请求失败");
-                            self.toast = Some(ToastMsg::error(format!("推导对话失败: {first}")));
+                    }
+                    Err(e) => {
+                        let first = e.lines().next().unwrap_or("请求失败");
+                        self.toast = Some(ToastMsg::error(format!("推导对话失败: {first}")));
+                        if !collapsed {
                             self.derive = DeriveState::Open;
                         }
                     }
                 }
                 self.derive_rx = None;
             }
-        }
-        if let Some(rx) = &self.tts_rx {
-            if let Ok(res) = rx.try_recv() {
+        if let Some(rx) = &self.tts_rx
+            && let Ok(res) = rx.try_recv() {
                 let word = self.tts_pending.take().unwrap_or_default();
                 self.tts_rx = None;
                 match res {
@@ -1412,39 +1480,33 @@ impl App {
                     }
                 }
             }
-        }
         // Expire the Esc-to-quit priming window — if the user didn't follow up, the
         // next Esc starts fresh instead of quitting on a stale confirmation.
-        if let Some(t) = self.esc_confirm {
-            if t.elapsed() >= ESC_CONFIRM_MS {
+        if let Some(t) = self.esc_confirm
+            && t.elapsed() >= ESC_CONFIRM_MS {
                 self.esc_confirm = None;
             }
-        }
         // Auto-dismiss non-sticky toasts once their TTL elapses. `Error` toasts (TTL=None)
         // stay until the next keypress clears them in on_key.
-        if let Some(t) = &self.toast {
-            if t.expired() {
+        if let Some(t) = &self.toast
+            && t.expired() {
                 self.toast = None;
             }
-        }
         // Retire stale animation clocks so is_animating() can short-circuit and the
         // progress getters return None. The render path already clamps by elapsed, but
         // leaving Some(stale) around means every idle frame pays the branch cost.
-        if let Some(t) = self.strike_anim {
-            if t.elapsed().as_millis() >= STRIKE_ANIM_MS {
+        if let Some(t) = self.strike_anim
+            && t.elapsed().as_millis() >= STRIKE_ANIM_MS {
                 self.strike_anim = None;
             }
-        }
-        if let Some((_, t)) = self.grade_flash {
-            if t.elapsed().as_millis() >= GRADE_FLASH_MS {
+        if let Some((_, t)) = self.grade_flash
+            && t.elapsed().as_millis() >= GRADE_FLASH_MS {
                 self.grade_flash = None;
             }
-        }
-        if let Some(t) = self.card_slide {
-            if t.elapsed().as_millis() >= CARD_SLIDE_MS {
+        if let Some(t) = self.card_slide
+            && t.elapsed().as_millis() >= CARD_SLIDE_MS {
                 self.card_slide = None;
             }
-        }
         if let Some(t) = self.reveal_anim {
             let n = self.morpheme_count() as u128;
             let window = n * MORPHEME_STAGGER_MS + MORPHEME_CELL_FADE_MS;
@@ -1461,11 +1523,11 @@ impl App {
         if let Some(c) = self.current.take() {
             let was_new = c.is_new;
             // Snapshot the pre-grade card state for one-step undo. We keep the
-            // DeckCard (FSRS state + word) and a timestamp; on undo we restore
-            // pos to this card, rewrite its FSRS state, and reload. The 3s window
-            // is short enough that the learner hasn't started engaging the next
-            // card, but long enough to catch a reflexive wrong-key press.
-            self.undo_snap = Some((c.dc.clone(), Instant::now()));
+            // DeckCard (FSRS state + word), its queue position, and a timestamp;
+            // on undo we restore pos to this card, rewrite its FSRS state, and
+            // reload. The 3s window is short enough that the learner hasn't started
+            // engaging the next card, but long enough to catch a wrong-key press.
+            self.undo_snap = Some((c.dc.clone(), self.pos, Instant::now()));
             let info = self.scheduler.grade(c.dc.card.clone(), rating, Utc::now());
             self.deck.save_card(&c.dc.word, &info.card, true)?;
             self.deck.log_review(&c.dc.word, rating, &info.review_log)?;
@@ -1489,7 +1551,7 @@ impl App {
     /// window covers the "pressed the wrong key, realized instantly" case.
     fn undo_grade(&mut self) -> Result<()> {
         const UNDO_WINDOW: Duration = Duration::from_secs(3);
-        let Some((dc, t)) = self.undo_snap.take() else {
+        let Some((dc, snap_pos, t)) = self.undo_snap.take() else {
             self.toast = Some(ToastMsg::info("无可撤销的评分"));
             return Ok(());
         };
@@ -1499,8 +1561,11 @@ impl App {
         }
         // Rewrite the card's FSRS state to the pre-grade snapshot. The review log
         // row stays (it's append-only history) but the card state is restored, so
-        // the next review uses the pre-grade stability/difficulty.
-        self.deck.save_card(&dc.word, &dc.card, true)?;
+        // the next review uses the pre-grade stability/difficulty. `dc.introduced`
+        // must come from the snapshot: hardcoding `true` would mark an undone NEW
+        // word as introduced, and the next session would schedule it as a "review"
+        // of a word never actually learned.
+        self.deck.save_card(&dc.word, &dc.card, dc.introduced)?;
         // Decrement the session counter that grade() incremented, so the done
         // screen and status bar stay accurate after an undo.
         if !dc.introduced {
@@ -1508,8 +1573,8 @@ impl App {
         } else {
             self.session_reviews = self.session_reviews.saturating_sub(1);
         }
-        // Move pos back to the undone card and reload it as current.
-        self.pos = self.pos.saturating_sub(1);
+        // Move pos back to the undone card's snapshotted position and reload it.
+        self.pos = snap_pos;
         self.load_current()?;
         // Clear the grade flash so it doesn't tint the restored card.
         self.grade_flash = None;
@@ -1543,6 +1608,14 @@ impl App {
         if self.last_gate_poll.elapsed() < GATE_POLL {
             return;
         }
+        self.refresh_gate();
+    }
+
+    /// Re-probe the gate unconditionally. `play_audio` calls this right before
+    /// checking `gate.open` — the 1s poll cadence leaves a window where the earphone
+    /// just left but the stale gate still reads open, and a Space in that window
+    /// would claim "♪ played" into a dead stream.
+    fn refresh_gate(&mut self) {
         self.last_gate_poll = Instant::now();
         let was_open = self.gate.open;
         let open_device = match probe::current_probe().enumerate() {
