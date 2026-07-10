@@ -1,6 +1,9 @@
 [package]
 name = "tuna"
-version = "0.1.0"
+# The version IS the release trigger: bumping it (and refreshing Cargo.lock) on
+# main is what cuts a release — see .github/workflows/release.yml. Last auto-
+# versioned release was v0.1.29; deliberate versioning starts at 0.2.0.
+version = "0.2.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/gtoxlili/tuna"

@@ -9,7 +9,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use super::app::{
-    App, CardView, ChatMode, ChatState, MORPHEME_CELL_FADE_MS, MORPHEME_STAGGER_MS, Stage, Strike,
+    App, CardView, ChatAnchor, ChatMode, ChatState, MORPHEME_CELL_FADE_MS, MORPHEME_STAGGER_MS,
+    Stage, Strike,
 };
 use super::settings;
 use super::theme::*;
@@ -238,6 +239,8 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let mut lines: Vec<Line> = Vec::new();
+    // The line index where the newest AI reply starts — the `LastReply` anchor.
+    let mut reply_line: Option<usize> = None;
 
     // Conversation history — each turn labeled by role.
     for turn in &app.chat_turns {
@@ -248,6 +251,7 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
             ]));
         } else {
             let md = tui_markdown::from_str(&turn.text);
+            reply_line = Some(lines.len());
             lines.push(Line::from(vec![Span::styled(
                 "✦  ",
                 Style::default().fg(AMBER),
@@ -304,17 +308,29 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
     };
     let popup = centered_rect(72, 72, area);
 
-    // Pin the view to the BOTTOM: the newest reply and the input line are the live
-    // edge of a chat, so `chat_scroll` counts rows up from the bottom (0 = pinned).
-    // We wrap the lines OURSELVES (`wrap_line`) and render the exact visible slice —
-    // Paragraph's word wrap produces an unpredictable row count, and any estimate
-    // error here is the input line drifting off-screen.
+    // Anchor-based viewport. We wrap the lines OURSELVES (`wrap_line`) and render
+    // the exact visible slice — Paragraph's word wrap produces an unpredictable
+    // row count, and any estimate error here is the input line drifting
+    // off-screen. `Bottom` pins the input; `LastReply` starts the view at the
+    // newest reply's first row, so a reply taller than the popup is read from its
+    // beginning instead of its tail. Manual ↑↓ offsets apply on top, clamped to
+    // the real content.
     let inner_w = popup.width.saturating_sub(2 + 4).max(8) as usize; // borders + l/r padding
     let inner_h = popup.height.saturating_sub(2 + 2).max(1) as usize; // borders + t/b padding
-    let rows: Vec<Line> = lines.iter().flat_map(|l| wrap_line(l, inner_w)).collect();
+    let mut rows: Vec<Line> = Vec::new();
+    let mut reply_row = 0usize;
+    for (i, l) in lines.iter().enumerate() {
+        if reply_line == Some(i) {
+            reply_row = rows.len();
+        }
+        rows.extend(wrap_line(l, inner_w));
+    }
     let max_scroll = rows.len().saturating_sub(inner_h);
-    let scroll = app.chat_scroll.min(max_scroll);
-    let start = rows.len().saturating_sub(inner_h + scroll);
+    let base = match app.chat_anchor {
+        ChatAnchor::Bottom => max_scroll,
+        ChatAnchor::LastReply => reply_row.min(max_scroll),
+    };
+    let start = (base as i64 + app.chat_scroll as i64).clamp(0, max_scroll as i64) as usize;
     let visible: Vec<Line> = rows[start..].iter().take(inner_h).cloned().collect();
 
     frame.render_widget(Clear, popup);
@@ -491,6 +507,15 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
             app.reveal_elapsed_ms(),
             &owned,
         ),
+        // Phase B reveal, enriched — answer first, then the derivation refresher.
+        (Stage::Revealed, Some(en)) => review_reveal(
+            &mut lines,
+            c,
+            en,
+            c.speak_cursor,
+            app.reveal_elapsed_ms(),
+            &owned,
+        ),
         // Prompt (review, or un-enriched new)
         (Stage::Prompt, _) => {
             let prompt = if c.is_new {
@@ -502,8 +527,17 @@ fn render_card(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled("▸ ", Style::default().fg(CURRENT)),
                 Span::styled(prompt, Style::default().fg(FOAM_DIM)),
             ]));
+            // Honest retrieval context for a review card: how many times it's been
+            // reviewed and how long ago — orients the recall without leaking it.
+            if !c.is_new && c.dc.card.reps > 0 {
+                let ago = human_ago(chrono::Utc::now() - c.dc.card.last_review);
+                lines.push(Line::from(Span::styled(
+                    format!("  第 {} 次复习 · 距上次 {}", c.dc.card.reps, ago),
+                    Style::default().fg(MUTED),
+                )));
+            }
         }
-        // Revealed (review, or un-enriched new) — plain meaning + ECDICT family
+        // Revealed, un-enriched — plain ECDICT meaning + family
         (Stage::Revealed, _) => plain_meaning(&mut lines, c),
     }
 
@@ -812,7 +846,13 @@ fn derivation_reveal(
         }
         lines.push(Line::from(spans));
     }
-    // examples (CET-4 friendly first, then 考研)
+    examples_and_confusables(lines, en, speak_cursor);
+}
+
+/// Examples (with speak marks — ↑↓ selects, Space speaks) and the confusable
+/// pairs. Shared by the phase-A reveal and the review reveal, so a review card
+/// never renders a speak cursor pointing at an invisible example.
+fn examples_and_confusables(lines: &mut Vec<Line>, en: &Enrichment, speak_cursor: usize) {
     let mut shown = 0;
     for ex in &en.examples {
         if ex.en.is_empty() || shown >= 2 {
@@ -856,47 +896,159 @@ fn derivation_reveal(
     }
 }
 
-/// Plain meaning for review cards and un-enriched new words: ZH gloss + EN def +
-/// ECDICT word-family.
-fn plain_meaning(lines: &mut Vec<Line>, c: &CardView) {
-    for (i, t) in c.entry.translation.lines().take(4).enumerate() {
-        let t = t.trim();
-        if t.is_empty() {
-            continue;
-        }
-        let style = if i == 0 {
-            Style::default().fg(AMBER).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(AMBER)
-        };
-        lines.push(Line::from(Span::styled(t.to_string(), style)));
+/// Compact Chinese "time since" for the review-prompt context line (分/时/天,
+/// mirroring the grade-hint units).
+fn human_ago(d: chrono::Duration) -> String {
+    let mins = d.num_minutes().max(0);
+    if mins < 60 {
+        format!("{}分", mins.max(1))
+    } else if mins < 60 * 24 {
+        format!("{}时", mins / 60)
+    } else {
+        format!("{}天", mins / (60 * 24))
     }
+}
+
+/// Split an ECDICT translation line into its part-of-speech tag and the meaning
+/// ("vt. 陈述" → ("vt.", "陈述")), so the tag can render dim and the meaning carry
+/// the color. Lines without a leading tag pass through whole.
+fn pos_split(line: &str) -> (Option<&str>, &str) {
+    if let Some((head, rest)) = line.split_once(' ')
+        && head.len() <= 8
+        && head.ends_with('.')
+        && head
+            .chars()
+            .all(|ch| ch.is_ascii_alphabetic() || matches!(ch, '.' | '&' | '/'))
+    {
+        return (Some(head), rest.trim_start());
+    }
+    (None, line)
+}
+
+/// ECDICT translation lines with the POS tag dimmed into a fixed-width gutter,
+/// so the meanings align in a column instead of reading as a wall of amber.
+fn translation_rows(lines: &mut Vec<Line>, translation: &str, cap: usize, lead: Style, rest: Style) {
+    for (i, t) in translation
+        .lines()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .take(cap)
+        .enumerate()
+    {
+        let (pos, meaning) = pos_split(t);
+        let style = if i == 0 { lead } else { rest };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<5}", pos.unwrap_or("")),
+                Style::default().fg(MUTED),
+            ),
+            Span::styled(meaning.to_string(), style),
+        ]));
+    }
+}
+
+/// The review reveal (Phase B 验, enriched): the ANSWER leads — the learner just
+/// tried to retrieve it — then a one-glance refresher of the derivation scaffold,
+/// then examples/confusables with the speak cursor live.
+fn review_reveal(
+    lines: &mut Vec<Line>,
+    c: &CardView,
+    en: &Enrichment,
+    speak_cursor: usize,
+    reveal_ms: Option<u128>,
+    owned: &[String],
+) {
+    if !en.gloss_zh.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("释义  ", Style::default().fg(MUTED)),
+            Span::styled(
+                en.gloss_zh.clone(),
+                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+    let lead = if en.gloss_zh.is_empty() {
+        Style::default().fg(AMBER).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(FOAM_DIM)
+    };
+    translation_rows(
+        lines,
+        &c.entry.translation,
+        3,
+        lead,
+        Style::default().fg(FOAM_DIM),
+    );
+    // The scaffold, refreshed in one glance: the parts and the chain that derived it.
+    if !en.morphemes.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(morpheme_cells(en, reveal_ms, owned)));
+    }
+    if !en.derivation_zh.is_empty() {
+        let parts: Vec<&str> = en
+            .derivation_zh
+            .split('→')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut spans = vec![Span::styled("推导  ", Style::default().fg(MUTED))];
+        for (i, p) in parts.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" → ", Style::default().fg(MUTED)));
+            }
+            let last = i == parts.len() - 1;
+            let style = if last {
+                Style::default().fg(AMBER)
+            } else {
+                Style::default().fg(FOAM_DIM)
+            };
+            spans.push(Span::styled(p.to_string(), style));
+        }
+        lines.push(Line::from(spans));
+    }
+    examples_and_confusables(lines, en, speak_cursor);
+}
+
+/// Plain meaning for un-enriched cards: POS-guttered translations + EN definition
+/// + ECDICT word-family.
+fn plain_meaning(lines: &mut Vec<Line>, c: &CardView) {
+    translation_rows(
+        lines,
+        &c.entry.translation,
+        4,
+        Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        Style::default().fg(AMBER),
+    );
     if !c.entry.definition.is_empty() {
         lines.push(Line::raw(""));
-        for d in c.entry.definition.lines().take(2) {
-            let d = d.trim();
-            if !d.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    d.to_string(),
-                    Style::default().fg(FOAM_DIM),
-                )));
-            }
+        for (i, d) in c
+            .entry
+            .definition
+            .lines()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .take(2)
+            .enumerate()
+        {
+            let label = if i == 0 { "英释 " } else { "     " };
+            lines.push(Line::from(vec![
+                Span::styled(label, Style::default().fg(MUTED)),
+                Span::styled(d.to_string(), Style::default().fg(FOAM_DIM)),
+            ]));
         }
     }
-    if c.is_new {
-        let fam = parse_exchange(&c.entry.exchange);
-        if !fam.is_empty() {
-            lines.push(Line::raw(""));
-            let mut spans = vec![Span::styled("同族  ", Style::default().fg(MUTED))];
-            for (i, (lab, form)) in fam.iter().enumerate() {
-                if i > 0 {
-                    spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
-                }
-                spans.push(Span::styled(form.clone(), Style::default().fg(CURRENT)));
-                spans.push(Span::styled(format!("({lab})"), Style::default().fg(MUTED)));
+    let fam = parse_exchange(&c.entry.exchange);
+    if !fam.is_empty() {
+        lines.push(Line::raw(""));
+        let mut spans = vec![Span::styled("同族  ", Style::default().fg(MUTED))];
+        for (i, (lab, form)) in fam.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
             }
-            lines.push(Line::from(spans));
+            spans.push(Span::styled(form.clone(), Style::default().fg(CURRENT)));
+            spans.push(Span::styled(format!("({lab})"), Style::default().fg(MUTED)));
         }
+        lines.push(Line::from(spans));
     }
 }
 

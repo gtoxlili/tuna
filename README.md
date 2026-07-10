@@ -88,6 +88,8 @@ uv run scripts/narrate.py  # 词根聚类 + 受控 LLM → assets/{morphemes,enr
 
 精加工是离线烤制、结果提交进仓库，用户零 LLM 成本。`bake.py` 抓 Wiktionary 模板做确定性词源解析，`narrate.py` 只让 LLM 翻译和串词已经验证的词素，禁止编造词根。
 
+发版：把 `Cargo.toml` 的 `version` 升一号，跑一次 `cargo build` 让 `Cargo.lock` 跟上，推到 main。只有这样的推送才会触发四平台构建和 GitHub Release，发布完成后自动通知 homebrew-tuna 更新 formula；普通代码推送不占用任何 CI。
+
 ## 许可
 
 GPL-3.0-or-later。联系：gtoxlili@outlook.com

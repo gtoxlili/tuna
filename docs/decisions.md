@@ -322,3 +322,40 @@ macOS 专属架构,`coreaudio-sys` + `core-foundation` 是无条件依赖,Window
 - **帮助面板补两套评分体系的语境**:FSRS 组标题注明"给当前这张卡打分",星火接线组注明
   "自动出现、给已学旧词加一次复习",并加"触发"行说明何时出现(与某已学词共享词根)、
   何时不出现(还没有已学同根词)——y/n 只在翻牌后生效的困惑源于此。
+
+## 发版链路:版本号即发版决定(2026-07)
+
+原方案两头都不对劲:主仓库每次 push 触及构建输入就跑四平台构建并自动发版
+(patch 号 = 提交计数),tap 仓库每天 cron 轮询最新 release 重生成 formula。
+代价是琐碎提交也烧 4 台 runner、release 列表被灌水、formula 最多滞后一天,
+且"哪次提交算一个版本"没有人的判断。
+
+现方案:
+- **发版决定 = Cargo.toml 版本号提升**。version 是唯一真相源:升版本(并让
+  Cargo.lock 跟上)推到 main,才触发构建;workflow 的 paths 只盯 Cargo.toml 与
+  workflow 文件,普通代码推送零 CI。version job 秒级门控:tag 已存在于同一
+  commit 视为重跑放行,存在于不同 commit 直接跳过(保护已发布产物的 sha256)。
+  Cargo.lock 未跟上版本号时快速失败,不浪费 10 分钟构建。
+- **`tuna --version` 回归 CARGO_PKG_VERSION**:版本号与 tag 天然一致,删掉
+  TUNA_VERSION 编译期注入。自动版本时代止于 v0.1.29,自主版本从 0.2.0 起。
+- **tap 事件驱动**:release 发布后 notify-tap job 向 homebrew-tuna 发
+  repository_dispatch(带 tag),tap 的 sync-formula 立即按该 tag 重生成
+  formula——formula 与 release 分钟级同步。每日 cron 降为每周自愈兜底
+  (dispatch 因 token 缺失/过期丢失时补上),手动 workflow_dispatch 保留。
+  跨仓库 dispatch 需要细粒度 PAT(TAP_DISPATCH_TOKEN,homebrew-tuna 的
+  Contents 读写);secret 未配置时 notify 步骤打 notice 跳过,不红。
+
+## 复习面板重排 + 聊天视口锚点(2026-07,第三轮打磨)
+
+- **复习揭示(Phase B)不再复用 plain ECDICT 墙**:此前有精加工的复习卡也走纯 ECDICT 路径,
+  四行 amber 释义糊成一片,且词素/例句全部不渲染,而 ↑↓ 选读光标仍指向这些看不见的例句
+  (Space 会读出屏幕上不存在的句子)。新 review_reveal 按提取场景排版:答案先行(释义 amber
+  引导 + ECDICT 释义按词性缩进成列,词性标签压暗),再一眼扫过推导脚手架(词素格 + 推导链),
+  例句带选读标记、辨析收尾。无精加工的卡走升级版 plain_meaning(词性列 + 英释标签 + 同族)。
+- **复习 Prompt 加提取上下文**:"第 N 次复习 · 距上次 X" 一行(reps + last_review),
+  帮助定位回忆而不泄露答案。
+- **聊天视口从"钉底部"改为锚点模型**:辨析 kickoff 的回复常超过弹窗高度,钉底部时用户只看到
+  回复的尾巴和输入行,开头被卷出视口,表现为"回复被吞"。现在视口有两个锚点:回复到达锚定到
+  该回复的第一行(阅读位),一打字/删字立即锚回底部(输入行永远不盲打);↑↓ 是相对锚点的
+  偏移,渲染端按真实换行行数精确 clamp。同模式重开保留锚点与偏移(收起时到达的未读回复,
+  重开即从头呈现)。切换对话模式时若上一模式回复仍在途,toast 告知丢弃,不再无声消失。

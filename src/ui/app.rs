@@ -170,6 +170,17 @@ pub enum ChatState {
     Pending,
 }
 
+/// Where the chat viewport anchors (manual ↑↓ offsets apply relative to it).
+/// `Bottom` keeps the input line in view — the typing position. `LastReply`
+/// presents the newest AI reply from its FIRST line: a long reply pinned to the
+/// bottom shows only its tail, which reads as the content having been swallowed.
+/// Typing snaps the anchor back to `Bottom` so the input is never edited blind.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ChatAnchor {
+    Bottom,
+    LastReply,
+}
+
 pub struct CardView {
     pub dc: DeckCard,
     pub entry: DictEntry,
@@ -263,10 +274,12 @@ pub struct App {
     /// Receiver for chat LLM responses. Each send gets a fresh channel, so a
     /// dropped receiver IS the cancellation — a stale worker's send just fails.
     chat_rx: Option<std::sync::mpsc::Receiver<std::result::Result<String, String>>>,
-    /// Scroll offset for the chat popup, counted in rows up from the BOTTOM
-    /// (0 = pinned to the newest message). The render side converts this to a top
-    /// offset, so new replies are always in view without chasing them.
-    pub chat_scroll: usize,
+    /// The chat viewport's anchor: bottom (input visible) or the newest reply's
+    /// first line (reading position). Set by events, adjusted manually via ↑↓.
+    pub chat_anchor: ChatAnchor,
+    /// Manual ↑↓ offset in display rows relative to the anchor (negative = up).
+    /// The render side clamps to the actual content, so this only needs a soft cap.
+    pub chat_scroll: i32,
     /// Whether AI replies are spoken aloud (through the earphone gate, using the
     /// zh+en chat voice model). Toggled with Tab inside the chat; persisted to
     /// config so the preference survives sessions.
@@ -325,6 +338,7 @@ impl App {
             chat_mode: ChatMode::Derive,
             chat_turns: Vec::new(),
             chat_rx: None,
+            chat_anchor: ChatAnchor::Bottom,
             chat_scroll: 0,
             chat_speak: cfg.tts.chat_speak,
             chat_tts_server: Arc::new(Mutex::new(None)),
@@ -360,6 +374,7 @@ impl App {
         self.chat = ChatState::Closed;
         self.chat_turns.clear();
         self.chat_rx = None;
+        self.chat_anchor = ChatAnchor::Bottom;
         self.chat_scroll = 0;
         // A new card is loading — prime the slide-in so it fades up rather than
         // jump-cutting. reset_motion users get None (no fade, instant).
@@ -1231,12 +1246,22 @@ impl App {
             return;
         }
         if mode != self.chat_mode {
+            // A mode is a conversation; switching starts fresh. If the old mode's
+            // reply is still in flight, say so — a silently vanished answer reads
+            // as a bug.
+            if self.chat_rx.is_some() {
+                self.toast = Some(ToastMsg::warn("已切换对话模式，上一个回复被丢弃"));
+            }
             self.chat_turns.clear();
             self.chat_rx = None;
             self.input.clear();
+            self.chat_anchor = ChatAnchor::Bottom;
+            self.chat_scroll = 0;
         }
+        // Same mode keeps anchor + manual scroll: reopening resumes the reading
+        // position (an unread reply that landed while collapsed stays anchored to
+        // its first line).
         self.chat_mode = mode;
-        self.chat_scroll = 0;
         self.chat = if self.chat_rx.is_some() {
             ChatState::Pending
         } else {
@@ -1336,6 +1361,8 @@ impl App {
         self.input.clear();
         self.chat_rx = Some(rx);
         self.chat = ChatState::Pending;
+        self.chat_anchor = ChatAnchor::Bottom;
+        self.chat_scroll = 0;
     }
 
     /// Handle keys while the chat overlay is open (or pending).
@@ -1346,15 +1373,15 @@ impl App {
     /// AI replies are spoken aloud.
     fn on_chat_key(&mut self, key: KeyEvent) -> Result<()> {
         // ↑↓ scroll the history in either state (reading back mid-wait is normal).
-        // `chat_scroll` counts rows up from the BOTTOM: 0 = pinned to the newest
-        // message, so an arriving reply is always visible without chasing it.
+        // Offsets are relative to `chat_anchor`; the render clamps to real content,
+        // this soft cap just keeps runaway presses cheap to undo.
         match key.code {
             KeyCode::Up => {
-                self.chat_scroll = (self.chat_scroll + 1).min(self.chat_rows_cap());
+                self.chat_scroll = (self.chat_scroll - 1).max(-500);
                 return Ok(());
             }
             KeyCode::Down => {
-                self.chat_scroll = self.chat_scroll.saturating_sub(1);
+                self.chat_scroll = (self.chat_scroll + 1).min(500);
                 return Ok(());
             }
             KeyCode::Esc => {
@@ -1376,9 +1403,15 @@ impl App {
                     }
                 }
                 KeyCode::Backspace => {
+                    // Editing needs the input line on screen — snap the viewport
+                    // back to the bottom before mutating.
+                    self.chat_anchor = ChatAnchor::Bottom;
+                    self.chat_scroll = 0;
                     self.input.pop();
                 }
                 KeyCode::Char(c) if !c.is_control() => {
+                    self.chat_anchor = ChatAnchor::Bottom;
+                    self.chat_scroll = 0;
                     self.input.push(c);
                 }
                 _ => {}
@@ -1444,15 +1477,6 @@ impl App {
         self.play_audio_via(cfg, server, &clean, "AI");
     }
 
-    /// A soft upper bound on how far back the chat can scroll — a rough row count
-    /// of the conversation. Render-side pinning clamps exactly; this just stops the
-    /// offset growing unbounded (which would need N presses of ↓ to come back).
-    fn chat_rows_cap(&self) -> usize {
-        self.chat_turns
-            .iter()
-            .map(|t| t.text.chars().count() / 32 + 2)
-            .sum()
-    }
 
     /// Drain any completed background work (chat replies, on-demand synth).
     pub fn poll_async(&mut self) {
@@ -1474,7 +1498,10 @@ impl App {
                         is_user: false,
                         text,
                     });
-                    self.chat_scroll = 0; // pin to the newest message
+                    // Present the reply from its FIRST line — pinned-to-bottom, a
+                    // long reply would show only its tail and read as swallowed.
+                    self.chat_anchor = ChatAnchor::LastReply;
+                    self.chat_scroll = 0;
                     if collapsed {
                         self.toast = Some(ToastMsg::info("AI 回复已就绪 · 按 a 查看"));
                     } else {

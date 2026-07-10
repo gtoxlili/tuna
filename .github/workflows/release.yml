@@ -1,15 +1,21 @@
 name: release
 
 # Build release binaries for macOS (arm64 + x86_64), Linux (x86_64), Windows,
-# publish a GitHub Release, and sign each artifact with a build-provenance
-# attestation — all on every push to main that touches the app's build inputs.
+# publish a GitHub Release with build-provenance attestations, and notify the
+# homebrew-tuna tap so its formula updates immediately (event-driven, no cron lag).
 #
-# No manual tagging: the `tag` job derives v<major>.<minor>.<patch> (patch = a
-# monotone commit-count over the same build-input paths) and pushes it *within
-# this run*, so the build/release jobs just depend on it via `needs`. Because
-# nothing listens for the tag as a workflow trigger, it can be pushed with the
-# default GITHUB_TOKEN — no PAT required (a GITHUB_TOKEN-pushed tag is silently
-# ignored by an `on: push: tags` trigger, but we don't use one).
+# THE RELEASE DECISION IS THE VERSION BUMP: Cargo.toml's `version` is the single
+# source of truth. Bump it (and let `cargo build` refresh Cargo.lock) in the
+# commit you consider release-worthy — that push is the only thing that builds.
+# Ordinary code pushes don't start a single runner (the paths filter below only
+# watches Cargo.toml and this file). The `version` job tags v<version> at HEAD;
+# a push where the version already has a tag no-ops in seconds.
+#
+# The tag is pushed with the default GITHUB_TOKEN — nothing listens for tags as a
+# workflow trigger, so no PAT is needed for tagging. Notifying the tap DOES need
+# a fine-grained PAT (secret TAP_DISPATCH_TOKEN, Contents read/write on
+# gtoxlili/homebrew-tuna); when absent, the notify step skips with a notice and
+# the tap's weekly self-heal or a manual run catches up.
 #
 # sherpa-onnx statically links a C++ lib whose build.rs fetches a prebuilt archive per
 # target triple (os+arch, not full triple). All four matrix targets have prebuilts;
@@ -21,20 +27,12 @@ on:
   push:
     branches: [main]
     paths:
-      - 'src/**'
       - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.cargo/**'
-      - 'assets/**'
       - '.github/workflows/release.yml'
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
-  # Bootstrap value used only when the repo has no existing v* tag yet; once one
-  # exists the `tag` job reads major.minor from the highest one. Bumping
-  # major/minor is a one-time manual `git tag v0.2.0 && git push --tags`.
-  INITIAL_MAJOR_MINOR: '0.1'
 
 permissions:
   contents: read
@@ -45,85 +43,62 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  tag:
+  version:
     name: resolve version
     runs-on: ubuntu-latest
     permissions:
       contents: write
     outputs:
-      tag: ${{ steps.version.outputs.tag }}
-      version: ${{ steps.version.outputs.version }}
-      proceed: ${{ steps.push.outputs.proceed }}
+      tag: ${{ steps.gate.outputs.tag }}
+      version: ${{ steps.gate.outputs.version }}
+      proceed: ${{ steps.gate.outputs.proceed }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Full history so rev-list --count sees every commit; fetch-tags so we
-          # can derive major.minor from existing tags and detect duplicates.
-          fetch-depth: 0
-          fetch-tags: true
 
-      - name: Resolve tag
-        id: version
+      - name: Gate on Cargo.toml version
+        id: gate
         shell: bash
         run: |
           set -euo pipefail
-          # Highest existing v<major>.<minor>.<patch> tag, version-aware so
-          # v0.1.10 sorts after v0.1.9 (lexical sort gets it wrong). The 'v[0-9]*'
-          # glob rejects stray non-version tags.
-          LATEST=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n1 || true)
-          if [ -n "$LATEST" ] && \
-             MM=$(echo "$LATEST" | sed -nE 's|^v([0-9]+\.[0-9]+)(\..*)?$|\1|p') && \
-             [ -n "$MM" ]; then
-              MAJOR_MINOR="$MM"
-              echo "MAJOR_MINOR=${MAJOR_MINOR} (from existing tag ${LATEST})"
-          else
-              MAJOR_MINOR='${{ env.INITIAL_MAJOR_MINOR }}'
-              echo "MAJOR_MINOR=${MAJOR_MINOR} (no prior tag, using bootstrap)"
+          VER=$(sed -nE 's/^version *= *"([^"]+)".*/\1/p' Cargo.toml | head -n1)
+          [ -n "$VER" ] || { echo "::error::no version in Cargo.toml"; exit 1; }
+          TAG="v${VER}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
+          # Fail fast if Cargo.lock wasn't refreshed after the bump — the builds
+          # run with --locked and would otherwise fail 10 minutes later.
+          if ! grep -A1 '^name = "tuna"$' Cargo.lock | grep -q "^version = \"${VER}\""; then
+              echo "::error::Cargo.lock still has the old tuna version — run 'cargo build' after bumping Cargo.toml and commit the lockfile"
+              exit 1
           fi
 
-          # Patch = commits that touched build inputs — same scope as the trigger,
-          # so doc-only churn neither tags nor inflates the version.
-          COUNT=$(git rev-list --count HEAD -- src Cargo.toml Cargo.lock .cargo assets)
-          TAG="v${MAJOR_MINOR}.${COUNT}"
-          echo "Resolved tag: ${TAG}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Push tag if new
-        id: push
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAG='${{ steps.version.outputs.tag }}'
           EXISTING=$(git ls-remote --tags origin "refs/tags/${TAG}^{}" "refs/tags/${TAG}" | awk '{print $1}' | tail -n1 || true)
           if [ -n "$EXISTING" ]; then
-              # The tag exists. Same commit ⇒ an idempotent re-run: proceed so a
-              # failed build can be retried. DIFFERENT commit ⇒ hard stop: the paths
-              # that trigger this workflow and the paths that count the version are
-              # not identical (e.g. a workflow-file-only push), and rebuilding an
-              # existing version from a newer commit would clobber the published
-              # artifacts — breaking every Homebrew formula sha256 that pins them.
-              RESOLVED=$(git rev-parse "${TAG}^{commit}" 2>/dev/null || echo "$EXISTING")
-              if [ "$RESOLVED" = "$GITHUB_SHA" ]; then
-                  echo "::notice::tag ${TAG} already on origin at this commit; re-run, proceeding"
+              # Same commit ⇒ idempotent re-run (a failed build can be retried).
+              # Different commit ⇒ this push didn't bump the version: no-op.
+              # Rebuilding an existing version from a newer commit would clobber
+              # published artifacts and break every formula sha256 pinning them.
+              if [ "$EXISTING" = "$GITHUB_SHA" ]; then
+                  echo "::notice::tag ${TAG} already at this commit; re-run, proceeding"
                   echo "proceed=true" >> "$GITHUB_OUTPUT"
               else
-                  echo "::notice::tag ${TAG} exists at ${RESOLVED} ≠ ${GITHUB_SHA}; version unchanged by this push — skipping build/release to protect published artifacts"
+                  echo "::notice::${TAG} already released from another commit — bump [package].version in Cargo.toml to cut a release"
                   echo "proceed=false" >> "$GITHUB_OUTPUT"
               fi
               exit 0
           fi
           git config user.name  'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git tag -a "${TAG}" -m "Auto-tag ${TAG} at ${GITHUB_SHA}"
+          git tag -a "${TAG}" -m "Release ${TAG}"
           git push origin "${TAG}"
           echo "::notice::pushed tag ${TAG}"
           echo "proceed=true" >> "$GITHUB_OUTPUT"
 
   build:
     name: build (${{ matrix.target }})
-    needs: tag
-    if: needs.tag.outputs.proceed == 'true'
+    needs: version
+    if: needs.version.outputs.proceed == 'true'
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container || '' }}
     strategy:
@@ -194,9 +169,6 @@ jobs:
       - name: build release
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
-          # Compiled into `tuna --version` (main.rs option_env!) so the binary
-          # reports the released version, not Cargo.toml's static placeholder.
-          TUNA_VERSION: ${{ needs.tag.outputs.version }}
         run: cargo build --release --target ${{ matrix.target }} --locked
 
       # Package the binary flat (at the archive root) — Homebrew's `bin.install`
@@ -204,7 +176,7 @@ jobs:
       - name: package (unix)
         if: matrix.archive == 'tar.gz'
         env:
-          VER: ${{ needs.tag.outputs.tag }}
+          VER: ${{ needs.version.outputs.tag }}
         run: |
           ver="${VER:-dev}"
           staging="tuna-${ver}-${{ matrix.target }}"
@@ -226,7 +198,7 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         env:
-          VER: ${{ needs.tag.outputs.tag }}
+          VER: ${{ needs.version.outputs.tag }}
         run: |
           $ver = $env:VER; if (-not $ver) { $ver = "dev" }
           $staging = "tuna-${ver}-${{ matrix.target }}"
@@ -257,7 +229,7 @@ jobs:
 
   release:
     name: publish release
-    needs: [tag, build]
+    needs: [version, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -278,7 +250,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          tag='${{ needs.tag.outputs.tag }}'
+          tag='${{ needs.version.outputs.tag }}'
           # Idempotent: a re-run on the same commit finds an existing release and
           # re-uploads (clobber) instead of erroring on a duplicate create.
           if gh release view "$tag" >/dev/null 2>&1; then
@@ -291,3 +263,32 @@ jobs:
               --generate-notes \
               artifacts/tuna-*.tar.gz artifacts/tuna-*.zip artifacts/checksums-*.txt
           fi
+
+  # Event-driven tap update: fire a repository_dispatch at gtoxlili/homebrew-tuna
+  # the moment the release is published, so `brew install` serves the new version
+  # immediately instead of after a daily cron. The tap's sync workflow reads the
+  # release itself (tag + checksums), so the payload only carries the tag for
+  # traceability. Needs TAP_DISPATCH_TOKEN (fine-grained PAT, Contents read/write
+  # on homebrew-tuna); without it this skips with a notice and the tap's weekly
+  # self-heal or a manual run catches up.
+  notify-tap:
+    name: notify homebrew tap
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: dispatch sync-formula
+        env:
+          GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::TAP_DISPATCH_TOKEN not configured — homebrew-tuna not notified; its weekly self-heal (or a manual sync-formula run) will pick up ${TAG}"
+            exit 0
+          fi
+          gh api "repos/gtoxlili/homebrew-tuna/dispatches" \
+            -f event_type=tuna-release \
+            -f "client_payload[tag]=${TAG}"
+          echo "::notice::homebrew-tuna notified for ${TAG}"
