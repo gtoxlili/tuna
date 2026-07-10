@@ -91,3 +91,6 @@ Matcha(条件流匹配,LJSpeech 女声)、Piper(VITS 社区多音色,默认 Less
   需在进 TUI 前把 stderr dup 到 `~/.tuna/logs/`(unix dup2 / windows _dup2)。
 - **星座 overlay 滚动**:词根家族很大时内容超出弹窗高度,cursor 可移到可视区外。需要
   scroll-to-cursor。当前 `GRAPH_MEMBER_CAP=18` 让它罕见。
+- **体系化语法课程(FSRS 语法卡)**:暂缓。语法目前以两种形态融入:离线语法速查(`x`,
+  生存底座)+ 例句语法对话(选中例句按 `a`,就地讲解)。整套语法课程需要烘焙一份课程资产
+  (等同再造一个 enrichment 管线),等例句级讲解的真实使用数据说明不够用时再立项。

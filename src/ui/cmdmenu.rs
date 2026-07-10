@@ -55,6 +55,8 @@ impl CommandMenu {
                 label: "对话",
                 hint: if is_new_prompt {
                     "和 AI 一起推导这个词"
+                } else if app.selected_example().is_some() {
+                    "和 AI 解析选中的这个例句"
                 } else if revealed {
                     "和 AI 分清易混词（多轮对话）"
                 } else {
@@ -62,6 +64,12 @@ impl CommandMenu {
                 },
                 shortcut: "a",
                 enabled: is_new_prompt || revealed,
+            },
+            CommandItem {
+                label: "语法速查",
+                hint: "词性缩写与句子骨架的大白话说明（离线）",
+                shortcut: "x",
+                enabled: true,
             },
             CommandItem {
                 label: "词源",

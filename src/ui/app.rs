@@ -158,6 +158,9 @@ pub struct ChatTurn {
 pub enum ChatMode {
     Derive,
     Compare,
+    /// About ONE example sentence (the selected speakable): plain-language
+    /// explanation of its structure and the word's role in it.
+    Grammar,
 }
 
 /// State of the AI chat overlay.
@@ -250,6 +253,11 @@ pub struct App {
     /// Vertical scroll offset of the help overlay — the reference outgrows a small
     /// terminal, and a reference whose tail can't be reached teaches nothing.
     pub help_scroll: usize,
+    /// Whether the offline grammar primer (`x`) is open — the survival glossary
+    /// that decodes POS tags and sentence skeletons in plain language.
+    pub show_primer: bool,
+    /// Vertical scroll offset of the grammar primer.
+    pub primer_scroll: usize,
     /// The current word's root-family, computed when the overlay opens.
     pub graph: Vec<MorphemeGroup>,
     /// Flattened cursor into the constellation overlay's members (arrow-key nav).
@@ -274,6 +282,10 @@ pub struct App {
     /// Receiver for chat LLM responses. Each send gets a fresh channel, so a
     /// dropped receiver IS the cancellation — a stale worker's send just fails.
     chat_rx: Option<std::sync::mpsc::Receiver<std::result::Result<String, String>>>,
+    /// Which example sentence a Grammar chat is about (index into the card's
+    /// enrichment examples). Part of the conversation's identity: pointing `a` at
+    /// a different sentence starts a fresh thread.
+    chat_example: usize,
     /// The chat viewport's anchor: bottom (input visible) or the newest reply's
     /// first line (reading position). Set by events, adjusted manually via ↑↓.
     pub chat_anchor: ChatAnchor,
@@ -329,6 +341,8 @@ impl App {
             show_graph: false,
             show_help: false,
             help_scroll: 0,
+            show_primer: false,
+            primer_scroll: 0,
             graph: Vec::new(),
             graph_cursor: 0,
             settings: Settings::default(),
@@ -338,6 +352,7 @@ impl App {
             chat_mode: ChatMode::Derive,
             chat_turns: Vec::new(),
             chat_rx: None,
+            chat_example: 0,
             chat_anchor: ChatAnchor::Bottom,
             chat_scroll: 0,
             chat_speak: cfg.tts.chat_speak,
@@ -492,6 +507,27 @@ impl App {
             self.show_help = true;
             self.help_scroll = 0;
             return Ok(());
+        }
+        // The grammar primer mirrors help: ↑↓ scroll, Esc/x close, anything else
+        // closes and falls through to act.
+        if self.show_primer {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('x') => {
+                    self.show_primer = false;
+                    return Ok(());
+                }
+                KeyCode::Up => {
+                    self.primer_scroll = self.primer_scroll.saturating_sub(1);
+                    return Ok(());
+                }
+                KeyCode::Down => {
+                    self.primer_scroll = (self.primer_scroll + 1).min(60);
+                    return Ok(());
+                }
+                _ => {
+                    self.show_primer = false;
+                }
+            }
         }
         // The settings overlay has the highest priority — it swallows all input.
         if self.settings.open {
@@ -661,8 +697,13 @@ impl App {
         let done = self.done();
         match key.code {
             // `a` needs a current card — at done there is no word to chat about.
-            KeyCode::Char('a') if is_new_prompt => self.open_chat(ChatMode::Derive),
-            KeyCode::Char('a') if revealed => self.open_chat(ChatMode::Compare),
+            KeyCode::Char('a') if is_new_prompt || revealed => self.open_contextual_chat(),
+            // The offline grammar primer — reference material, safe at any stage
+            // (nothing on it can spoil a recall).
+            KeyCode::Char('x') => {
+                self.show_primer = true;
+                self.primer_scroll = 0;
+            }
             KeyCode::Char('w') if revealed => self.open_wiktionary(),
             KeyCode::Char('g') if revealed => self.open_graph(),
             // Settings is a runtime concern — reachable even after the session ends
@@ -715,7 +756,7 @@ impl App {
             // letter respects the same enabled gate as Enter — otherwise the menu
             // would show a row dimmed while its shortcut silently fires anyway (or
             // no-ops), and the dimming would be a lie either way.
-            KeyCode::Char(ch @ ('a' | 'w' | 'g' | 's' | '?' | 'u')) => {
+            KeyCode::Char(ch @ ('a' | 'w' | 'g' | 's' | 'x' | '?' | 'u')) => {
                 if let Some(it) = items.iter().find(|it| it.shortcut == ch.to_string()) {
                     if it.enabled {
                         let label = it.label;
@@ -734,16 +775,10 @@ impl App {
     /// direct-letter shortcuts so the two paths never drift.
     fn fire_command(&mut self, label: &str) -> Result<()> {
         match label {
-            "对话" => {
-                let is_new_prompt = matches!(
-                    self.current.as_ref().map(|c| (c.is_new, c.stage)),
-                    Some((true, Stage::Prompt))
-                );
-                self.open_chat(if is_new_prompt {
-                    ChatMode::Derive
-                } else {
-                    ChatMode::Compare
-                });
+            "对话" => self.open_contextual_chat(),
+            "语法速查" => {
+                self.show_primer = true;
+                self.primer_scroll = 0;
             }
             "词源" => self.open_wiktionary(),
             "星座" => self.open_graph(),
@@ -1238,14 +1273,49 @@ impl App {
     /// (pre-reveal) and compare (post-reveal) never share a thread even on the same
     /// card. Compare mode with no history kicks off immediately: the learner came
     /// to hear the distinction, not to compose an opening question.
-    fn open_chat(&mut self, mode: ChatMode) {
+    /// `a` asks the AI about whatever the cursor points at: a new word's Prompt →
+    /// derive game; a selected example sentence → grammar for THAT sentence; the
+    /// word itself → confusable compare. One gesture, the pointed-at thing is the
+    /// topic.
+    fn open_contextual_chat(&mut self) {
+        let is_new_prompt = matches!(
+            self.current.as_ref().map(|c| (c.is_new, c.stage)),
+            Some((true, Stage::Prompt))
+        );
+        if is_new_prompt {
+            return self.open_chat(ChatMode::Derive, 0);
+        }
+        match self.selected_example() {
+            Some(i) => self.open_chat(ChatMode::Grammar, i),
+            None => self.open_chat(ChatMode::Compare, 0),
+        }
+    }
+
+    /// The example index the speak cursor rests on, when the card is revealed.
+    /// Drives the contextual `a` (grammar chat about that sentence) and the
+    /// cursor-aware labels in the keybar / command menu.
+    pub fn selected_example(&self) -> Option<usize> {
+        if !matches!(
+            self.current.as_ref().map(|c| c.stage),
+            Some(Stage::Revealed)
+        ) {
+            return None;
+        }
+        match self.current_speakable() {
+            Some(Speakable::Example(i)) => Some(i),
+            _ => None,
+        }
+    }
+
+    fn open_chat(&mut self, mode: ChatMode, example: usize) {
         if self.ds_key.is_empty() {
             self.toast = Some(ToastMsg::error(
                 "未配置 DeepSeek 密钥（~/.tuna/config.toml）",
             ));
             return;
         }
-        if mode != self.chat_mode {
+        // A conversation's identity is (mode, and for grammar: WHICH sentence).
+        if mode != self.chat_mode || (mode == ChatMode::Grammar && example != self.chat_example) {
             // A mode is a conversation; switching starts fresh. If the old mode's
             // reply is still in flight, say so — a silently vanished answer reads
             // as a bug.
@@ -1258,17 +1328,23 @@ impl App {
             self.chat_anchor = ChatAnchor::Bottom;
             self.chat_scroll = 0;
         }
-        // Same mode keeps anchor + manual scroll: reopening resumes the reading
-        // position (an unread reply that landed while collapsed stays anchored to
-        // its first line).
+        // Same conversation keeps anchor + manual scroll: reopening resumes the
+        // reading position (an unread reply that landed while collapsed stays
+        // anchored to its first line).
         self.chat_mode = mode;
+        self.chat_example = example;
         self.chat = if self.chat_rx.is_some() {
             ChatState::Pending
         } else {
             ChatState::Open
         };
-        if mode == ChatMode::Compare && self.chat_turns.is_empty() && self.chat_rx.is_none() {
-            self.send_chat_msg(String::new()); // kickoff — the model opens
+        // Compare and grammar open with the model's lead-in — the learner came for
+        // the distinction / the sentence walkthrough, not to compose a question.
+        if matches!(mode, ChatMode::Compare | ChatMode::Grammar)
+            && self.chat_turns.is_empty()
+            && self.chat_rx.is_none()
+        {
+            self.send_chat_msg(String::new());
         }
     }
 
@@ -1320,6 +1396,13 @@ impl App {
                     .join(", ")
             })
             .unwrap_or_default();
+        // The sentence a grammar chat is about (en + zh), by the stored index.
+        let (sentence_en, sentence_zh) = c
+            .enrichment
+            .as_ref()
+            .and_then(|en| en.examples.get(self.chat_example))
+            .map(|ex| (ex.en.clone(), ex.zh.clone()))
+            .unwrap_or_default();
         // Stash the user message + recent history for the worker. Cap the resent
         // history — a marathon chat would otherwise inflate every request's prompt
         // with the full transcript; the last dozen turns carry the live thread.
@@ -1346,6 +1429,9 @@ impl App {
                 ),
                 ChatMode::Compare => crate::llm::socratic::compare_chat(
                     &client, &model, &word, &meaning, &neighbours, &history, &send_msg,
+                ),
+                ChatMode::Grammar => crate::llm::socratic::grammar_chat(
+                    &client, &model, &word, &sentence_en, &sentence_zh, &history, &send_msg,
                 ),
             }
             .map_err(|e| e.to_string());

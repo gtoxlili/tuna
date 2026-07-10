@@ -143,6 +143,11 @@ pub fn preview(deck_path: &Path, word: Option<String>) -> Result<()> {
     }
     term.draw(|f| view::render(f, &app))?;
     println!("\n── REVIEW REVEALED (answer first) ──\n{}", term.backend());
+
+    // Verify the offline grammar primer overlay renders.
+    app.show_primer = true;
+    term.draw(|f| view::render(f, &app))?;
+    println!("\n── GRAMMAR PRIMER ──\n{}", term.backend());
     Ok(())
 }
 

@@ -96,6 +96,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_constellation(frame, area, app);
     settings::render(frame, area, app);
     super::cmdmenu::render(frame, area, app);
+    render_primer(frame, area, app);
     render_help(frame, area, app);
 }
 
@@ -283,6 +284,7 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
         let placeholder = match app.chat_mode {
             ChatMode::Derive => "说说你看到了哪些词素……",
             ChatMode::Compare => "追问，或说说你的理解……",
+            ChatMode::Grammar => "哪里没看懂，直接问……",
         };
         let input_span = if app.input.is_empty() {
             Span::styled(placeholder, Style::default().fg(MUTED))
@@ -317,6 +319,7 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
     let title = match app.chat_mode {
         ChatMode::Derive => " 推导 · 和 AI 一起拆词 ",
         ChatMode::Compare => " 辨析 · 和 AI 分清易混词 ",
+        ChatMode::Grammar => " 语法 · 看懂这个句子 ",
     };
     let popup = centered_rect(72, 72, area);
 
@@ -1202,11 +1205,22 @@ fn render_keybar(frame: &mut Frame, area: Rect, app: &App) {
                         flash_rating == Some(rs_fsrs::Rating::Easy),
                     ),
                     sep(),
-                    key("↑↓", "选读", CURRENT),
+                    key("↑↓", "选中", CURRENT),
                     key("Space", "发音", MUTED),
-                    // The command cluster collapses behind Tab (辨析/词源/星座/设置
-                    // all live in the menu) — four extra letter chips pushed the bar
-                    // past what a glance can parse, and Tab is the discovery surface.
+                    // `a` follows the cursor: pointing at an example asks about THAT
+                    // sentence's grammar, pointing at the word asks the contrast.
+                    key(
+                        "a",
+                        if app.selected_example().is_some() {
+                            "析这句"
+                        } else {
+                            "辨析"
+                        },
+                        AMBER,
+                    ),
+                    // The other commands collapse behind Tab (词源/星座/设置 live in
+                    // the menu) — extra letter chips pushed the bar past what a
+                    // glance can parse, and Tab is the discovery surface.
                     key("Tab", "命令", MUTED),
                     key("?", "帮助", MUTED),
                     key("Esc", "再按退出", MUTED),
@@ -1323,7 +1337,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
             ("Enter", "揭示（新词：从拆到联；复习：从问到答）"),
             (
                 "↑↓",
-                "揭示后选读目标（单词 / 例句）；星座内导航；对话/帮助滚动",
+                "揭示后选中朗读/提问目标（单词 / 例句）；星座内导航；对话/帮助滚动",
             ),
             ("Tab", "打开命令菜单（↑↓ 选择，Enter 确认，字母直达）"),
             (
@@ -1365,7 +1379,11 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     lines.extend(group(
         "扩展",
         &[
-            ("a", "新词未揭示：和 AI 一起推导；揭示后与复习：AI 辨析对话"),
+            (
+                "a",
+                "问 AI：新词未揭示=推导；选中例句=讲这句的语法；其余=易混辨析",
+            ),
+            ("x", "语法速查：词性缩写与句子骨架的大白话说明（离线）"),
             ("w", "打开 Wiktionary 词源页"),
             ("g", "星座：当前词的词根家族（已学同根 + 一根之差的前沿）"),
             ("?", "本帮助（↑↓ 滚动，Esc/? 关闭，其他键穿透到下层）"),
@@ -1397,6 +1415,93 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
         .border_style(Style::default().fg(CURRENT))
         .title(" ? 帮助 · ↑↓ 滚动 · Esc/? 关闭 ")
         .title_style(Style::default().fg(CURRENT).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(SLATE).fg(FOAM))
+        .padding(Padding::new(2, 2, 1, 1));
+    frame.render_widget(Paragraph::new(visible).block(block), popup);
+}
+
+/// The offline grammar primer (`x`) — a survival glossary, not a course: it
+/// decodes exactly the grammar surface tuna itself shows (the POS gutter on
+/// review cards, why example sentences need the little words) in plain language.
+/// Scrolls like the help overlay.
+fn render_primer(frame: &mut Frame, area: Rect, app: &App) {
+    if !app.show_primer {
+        return;
+    }
+    let head = |t: &str| -> Line<'static> {
+        Line::from(Span::styled(
+            t.to_string(),
+            Style::default().fg(FOAM).add_modifier(Modifier::BOLD),
+        ))
+    };
+    let row = |k: &str, d: &str| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("  {:<7}", k), Style::default().fg(CURRENT)),
+            Span::styled(d.to_string(), Style::default().fg(FOAM_DIM)),
+        ])
+    };
+    let note = |t: &str| -> Line<'static> {
+        Line::from(Span::styled(
+            format!("  {t}"),
+            Style::default().fg(FOAM_DIM),
+        ))
+    };
+    let lines: Vec<Line> = vec![
+        head("词性 — 词的身份（释义前的缩写就是它）"),
+        row("n.", "名词：人、物、概念的名字（state 国家）"),
+        row("v.", "动词：动作或状态（push 推）"),
+        row("vt.", "及物动词：后面直接跟对象（state a fact 陈述事实）"),
+        row("vi.", "不及物动词：不能直接跟对象，要接就得借介词（lean against the wall）"),
+        row("adj./a.", "形容词：描述名词（mighty storm 猛烈的风暴）"),
+        row("adv./ad.", "副词：描述动作怎么发生（push hard 用力推）"),
+        row("prep.", "介词：挂名词用的小词，表示关系（against / with / in）"),
+        row("conj.", "连词：把两句话或两个成分连起来（and / but / because）"),
+        row("pron.", "代词：替名词出场（he / it / this）"),
+        row("art.", "冠词：名词前的小标记（a / an / the）"),
+        Line::raw(""),
+        head("句子骨架 — 每个英语句子的底层结构"),
+        note("谁 + 做什么 + 对什么：He pushed the car.（他 推 车）"),
+        note("是什么/怎么样：The evidence is against him.（主语 + be + 描述）"),
+        note("其余都是挂件：时间、地点、方式，用介词短语挂上去"),
+        Line::raw(""),
+        head("为什么需要介词"),
+        note("每个动词能不能直接带对象是固定的。能直接带的叫及物（push the car）；"),
+        note("不能的叫不及物，要表达对象就得用介词搭桥：lean 靠（不及物）"),
+        note("→ lean the wall ✗ → lean against the wall ✓（against 搭的桥）"),
+        Line::raw(""),
+        head("时态在动词上变形"),
+        note("过去发生 → 动词变形：push → pushed；is → was"),
+        note("正在进行 → be + 动词-ing：is pushing"),
+        note("已经完成 → have + 过去分词：has pushed"),
+        Line::raw(""),
+        head("看长句的顺序"),
+        note("1 先找谓语动词（句子的心脏）  2 谓语前面是主语"),
+        note("3 谓语后面是对象/描述  4 剩下的介词短语、从句逐个挂回去"),
+        Line::raw(""),
+        note("例句里哪里没看懂：↑↓ 选中那句，按 a 让 AI 讲给你听"),
+    ];
+    // Chat-style exact slicing so the tail is always reachable.
+    let popup = centered_rect(76, 80, area);
+    let inner_w = popup.width.saturating_sub(2 + 4).max(8) as usize;
+    let inner_h = popup.height.saturating_sub(2 + 2).max(1) as usize;
+    let rows: Vec<Line> = lines.iter().flat_map(|l| wrap_line(l, inner_w)).collect();
+    let max_scroll = rows.len().saturating_sub(inner_h);
+    let scroll = app.primer_scroll.min(max_scroll);
+    let mut visible: Vec<Line> = rows[scroll..].iter().take(inner_h).cloned().collect();
+    if scroll < max_scroll
+        && let Some(last) = visible.last_mut()
+    {
+        *last = Line::from(Span::styled(
+            "   ⌄ ↓ 更多",
+            Style::default().fg(CURRENT),
+        ));
+    }
+    frame.render_widget(Clear, popup);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(AMBER))
+        .title(" x 语法速查 · ↑↓ 滚动 · Esc/x 关闭 ")
+        .title_style(Style::default().fg(AMBER).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(SLATE).fg(FOAM))
         .padding(Padding::new(2, 2, 1, 1));
     frame.render_widget(Paragraph::new(visible).block(block), popup);

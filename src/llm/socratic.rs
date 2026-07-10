@@ -21,12 +21,19 @@ pub fn socratic(client: &DeepSeek, model: &str, word: &str, context: &str) -> Re
 
 /// System prompt for the derive chat (new word, pre-reveal). The model holds the
 /// ground truth so it can steer accurately; the game's one invariant is that the
-/// learner derives the meaning himself.
-pub const DERIVE_CHAT_SYSTEM: &str = "你是词根推导环节的引导者，帮考研学习者从词素推出一个新词的意思。你会收到：目标词、已核验的词素、真实词义（学习者此刻看不到，仅供你校准方向）。红线：不把词义直接告诉他，他要自己推出来。他说对的部分予以确认；有偏差时，用一个针对具体词素的提问把他引回来。每次回复 1-3 句，中文，像对话。";
+/// learner derives the MEANING himself — everything else (grammar, usage) is
+/// scaffolding knowledge and gets answered plainly.
+pub const DERIVE_CHAT_SYSTEM: &str = "你是词根推导环节的引导者，帮考研学习者从词素推出一个新词的意思。你会收到：目标词、已核验的词素、真实词义（学习者此刻看不到，仅供你校准方向）。红线只有一条且只管词义：不把词义直接告诉他，他要自己推出来。他说对的部分予以确认；有偏差时，用一个针对具体词素的提问把他引回来。词义之外的问题（语法、用法、为什么这么说）不属于谜题，直接用大白话讲清楚。学习者几乎没有语法基础，确需术语时当场用几个字解释。每次回复 1-3 句，中文，像对话。";
 
 /// System prompt for the compare chat (post-reveal / review). The learner has seen
 /// the meaning; the goal is telling the word apart from its neighbours.
-pub const COMPARE_CHAT_SYSTEM: &str = "你是考研词汇辨析导师，帮学习者分清一个词与它的形近/近义词。你会收到：目标词、词义、已标注的易混/近义词（可能为空，为空时自行挑最值得对比的词）。开场先把相关词各自的词根拆一行，再提一个能让他自己推出区别的问题；他回应后确认或纠偏，用一两句点出核心差异。每次回复简短，中文。";
+pub const COMPARE_CHAT_SYSTEM: &str = "你是考研词汇辨析导师，帮学习者分清一个词与它的形近/近义词。你会收到：目标词、词义、已标注的易混/近义词（可能为空，为空时自行挑最值得对比的词）。开场先把相关词各自的词根拆一行，再提一个能让他自己推出区别的问题；他回应后确认或纠偏，用一两句点出核心差异。他追问时直接回答，先给结论再展开。学习者几乎没有语法基础，确需术语时当场用几个字解释。每次回复简短，中文。";
+
+/// System prompt for the grammar chat (an example sentence, post-reveal). Grammar
+/// is support knowledge, not the derivation game: conclusions come FIRST, plainly —
+/// the learner starts from zero grammar, asks "why can't I say X", and deserves
+/// the answer.
+pub const GRAMMAR_CHAT_SYSTEM: &str = "你是英语句子讲解者，服务几乎零语法基础的考研学习者。你会收到一个例句（含中文翻译）和它出自的单词。用大白话讲，确需术语时当场用几个字解释（如“介词，挂名词用的小词”）。开场：先一句话说这个句子的骨架（谁、做什么、对什么），再说目标词在句中的角色和为什么需要它。之后他问什么就直接答什么，先给结论，再用一个极简的对照例子说明。每次回复不超过 5 句，中文。";
 
 /// Continue a multi-turn derivation chat. Builds the full message history (system +
 /// prior turns + new user message) and sends it to the LLM. `meaning` is the verified
@@ -98,6 +105,38 @@ pub fn compare_chat(
     // same max_tokens budget, and a tight cap gets fully consumed by the thinking
     // — the answer comes back empty. The replies themselves stay short (the
     // system prompt asks for it); the budget is for the chain.
+    let text = client.chat_multi(model, messages, 8192)?;
+    Ok(text.trim().to_string())
+}
+
+/// Continue a multi-turn grammar chat about one example sentence. An empty
+/// `new_message` is the kickoff: the model opens with the sentence's skeleton and
+/// the target word's role in it.
+pub fn grammar_chat(
+    client: &DeepSeek,
+    model: &str,
+    word: &str,
+    sentence_en: &str,
+    sentence_zh: &str,
+    turns: &[(bool, String)], // (is_user, text)
+    new_message: &str,
+) -> Result<String> {
+    let mut messages: Vec<(&str, String)> = vec![("system", GRAMMAR_CHAT_SYSTEM.to_string())];
+    let zh = if sentence_zh.is_empty() {
+        String::new()
+    } else {
+        format!("\n中文翻译: {sentence_zh}")
+    };
+    let info = format!("目标词: {word}\n例句: {sentence_en}{zh}");
+    messages.push(("user", info));
+    for (is_user, text) in turns {
+        messages.push((if *is_user { "user" } else { "assistant" }, text.clone()));
+    }
+    if !new_message.is_empty() {
+        messages.push(("user", new_message.to_string()));
+    }
+    // Deliberately roomy: reasoning models spend their chain-of-thought from the
+    // same max_tokens budget; a tight cap comes back as an empty answer.
     let text = client.chat_multi(model, messages, 8192)?;
     Ok(text.trim().to_string())
 }

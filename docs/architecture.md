@@ -33,7 +33,7 @@ src/
 ├── llm/
 │   ├── mod.rs         DeepSeek OpenAI 兼容 blocking 客户端;chat_json / chat_text
 │   ├── enrich.rs      词条精加工 schema(Enrichment/Morpheme/GraphEdge/Example)+ enrich_word
-│   ├── socratic.rs    AI 对话两模式(derive_chat/compare_chat)+ CLI 一次性辨析
+│   ├── socratic.rs    AI 对话三模式(derive/compare/grammar_chat)+ CLI 一次性辨析
 │   └── mod.rs
 └── ui/
     ├── app.rs         App 状态机:Stage/Strike/Chat/Gate;on_key 事件路由;后台轮询
@@ -90,10 +90,12 @@ src/
 - **Strike**(P2 星火接线):`Prompt` / `Flipped` / `Idle`。新词揭示后弹"词根 X 你在哪个已学的词里见过?",
   用户脑内回忆 → `Space` 翻牌 → 显示 FSRS 挑的最佳老词 → y/n 给那个老词记一次真复习。
   Strike 期间**阻塞新词评分**;Prompt 阶段隐藏 siblings 列表防剧透。节点只在被回忆时愈合。
-- **Chat**(AI 对话):`Closed` / `Open` / `Pending`,两种模式共用一个 overlay。
-  Derive 模式(新词未揭示,`a`):学习者说出自己的拆解,LLM 拿着已核验词素与真实含义引导但
-  绝不直说。Compare 模式(揭示后,`a`):打开即由模型先手给出易混词对照引导,可继续追问。
-  Esc 收起保留对话,回复在收起后到达以 toast 提示;换卡或换模式即清空。开启朗读(对话内
+- **Chat**(AI 对话):`Closed` / `Open` / `Pending`,三种模式共用一个 overlay,`a` 按
+  光标指向选模式。Derive(新词未揭示):学习者说出自己的拆解,LLM 拿着已核验词素与真实含义
+  引导;苏格拉底红线只管词义,语法等其余问题直接讲。Compare(揭示后,选中单词):模型先手
+  给出易混词对照引导,可追问。Grammar(揭示后,↑↓ 选中某个例句):模型先手讲这句的骨架与
+  目标词的角色,讲解式(先结论后展开),对话身份含例句序号,指向另一句即开新线程。
+  Esc 收起保留对话,回复在收起后到达以 toast 提示;换卡或换对话即清空。开启朗读(对话内
   Tab)时,回复经中英混合语音(Kokoro 多语)走耳机门读出。
 - **Gate**:`Open` / `Closed`。Closed 时零音频。
 
@@ -108,7 +110,8 @@ src/
 | `y` / `n` | 星火接线:记得 / 想不起(给锚点词记一次真实 FSRS 复习) |
 | `u` | 撤销上次评分(评分后 3 秒内一步;窗口内 keybar 显示 `u 撤销` 提示) |
 | `Tab` | 命令菜单;AI 对话内=切换回复朗读(需中文语音模型) |
-| `a` | AI 对话:新词未揭示=推导模式;揭示后与复习=辨析模式(均需 DeepSeek 密钥) |
+| `a` | 问 AI(指哪问哪):新词未揭示=推导;选中例句=讲这句的语法;其余=易混辨析(需密钥) |
+| `x` | 语法速查:词性缩写与句子骨架的大白话说明,离线,任意阶段可开 |
 | `w` | 打开该词 Wiktionary 词源页(揭示后) |
 | `g` | 星座:当前词的词根家族(同根已学词 + 只差一个词根的前沿暗星);overlay 内 `↑↓` 导航 `Space` 朗读 |
 | `s` | 设置:运行时切换 TTS 引擎 overlay(Kokoro/Matcha/Piper);done 态也可用 |
